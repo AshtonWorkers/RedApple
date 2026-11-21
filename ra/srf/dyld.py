@@ -234,6 +234,25 @@ def split_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> List[str]:
     return out
 
 
+def _utf16_strings(data: bytes, encoding: str, max_len: int) -> List[str]:
+    text = data.decode(encoding, "ignore")
+    out: List[str] = []
+    for part in text.split("\x00"):
+        if not part or len(part) > max_len:
+            continue
+        if all((32 <= ord(c) < 127) or c in "\t\n\r" for c in part):
+            out.append(part)
+    return out
+
+
+def split_utf16_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> List[str]:
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return _utf16_strings(data, "utf-16", max_len)
+    little = _utf16_strings(data, "utf-16-le", max_len)
+    big = _utf16_strings(data, "utf-16-be", max_len)
+    return little if len(little) >= len(big) else big
+
+
 class DyldCache:
     """Opened dyld shared cache (main file plus subcache siblings)."""
 
@@ -308,7 +327,10 @@ class DyldCache:
             if section.name not in wanted or section.size <= 0 or section.size > MAX_SECTION_BYTES:
                 continue
             data = await self.section_bytes(image, section)
-            out.extend(split_strings(data))
+            if section.name == "__ustring":
+                out.extend(split_utf16_strings(data))
+            else:
+                out.extend(split_strings(data))
         return out
 
     async def close(self) -> None:
@@ -333,16 +355,22 @@ def _native_cache_arch() -> str:
     return ""
 
 
+def _family_paths(directory: Path, stem: str) -> List[Path]:
+    paths = [p for p in directory.glob(stem) if p.is_file()]
+    paths += [p for p in directory.glob(stem + ".*") if p.is_file()]
+    return sorted(paths)
+
+
 def _cache_candidates(root: Path) -> List[Path]:
     if root.is_file():
         stem = root.name.split(".", 1)[0]
-        paths = sorted(root.parent.glob(stem + "*"))
-    else:
-        arch = _native_cache_arch()
-        paths = sorted(root.glob(f"dyld_shared_cache_{arch}*")) if arch else []
-        if not paths:
-            paths = sorted(root.glob("dyld_shared_cache*"))
-    return [p for p in paths if p.is_file()]
+        return _family_paths(root.parent, stem)
+    arch = _native_cache_arch()
+    if arch:
+        paths = _family_paths(root, f"dyld_shared_cache_{arch}")
+        if paths:
+            return paths
+    return sorted(p for p in root.glob("dyld_shared_cache*") if p.is_file())
 
 
 async def _read_va(

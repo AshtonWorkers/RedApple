@@ -250,16 +250,15 @@ async def compile_surface(
     for profile in profiles:
         profiles_by_name.setdefault(profile.name, profile)
 
-    for profile in sorted(profiles, key=lambda p: (p.name, p.source, p.sha256)):
+    profiles_sorted = sorted(profiles, key=lambda p: (p.name, p.source, p.sha256))
+    for profile in profiles_sorted:
         for literal in profile.mach_lookup_allow:
             if literal.startswith("regex:") or not SERVICE_NAME_RE.match(literal):
                 continue
-            cand = candidates.get(literal)
-            if cand is None:
-                cand = _Candidate(name=literal)
-                candidates[literal] = cand
-            if literal not in profile.mach_lookup_deny:
-                cand.grant(profile)
+            if literal not in candidates:
+                candidates[literal] = _Candidate(name=literal)
+
+    for profile in profiles_sorted:
         for cand in candidates.values():
             if cand.name in profile.mach_lookup_deny and cand.name not in profile.mach_lookup_allow:
                 continue

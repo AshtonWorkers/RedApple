@@ -2,7 +2,7 @@
 
 import struct
 
-from ra.srf.dyld import MachOImage, MachOSection, parse_macho, split_strings
+from ra.srf.dyld import MachOImage, MachOSection, parse_macho, split_strings, split_utf16_strings
 
 
 def _section(seg: str, name: str, addr: int, size: int) -> bytes:
@@ -31,3 +31,12 @@ def test_RA_SRF_001_parse_macho_sections():
 
 def test_RA_SRF_001_split_strings_is_deterministic():
     assert split_strings(b"alpha\0beta\0\0gamma\0") == ["alpha", "beta", "gamma"]
+
+
+def test_RA_SRF_001_split_utf16_strings():
+    assert split_utf16_strings("com.apple.foo".encode("utf-16-le") + b"\x00\x00") == [
+        "com.apple.foo"
+    ]
+    assert split_utf16_strings("com.apple.foo".encode("utf-16-be") + b"\x00\x00") == [
+        "com.apple.foo"
+    ]

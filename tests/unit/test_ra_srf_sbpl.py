@@ -34,3 +34,24 @@ def test_RA_SRF_001_profiles_from_cache_strings_are_deterministic():
     assert profiles[0].name.endswith("#str1")
     again = profiles_from_strings(strings, source="image:/x")
     assert [p.sha256 for p in profiles] == [p.sha256 for p in again]
+
+
+def test_RA_SRF_001_sbpl_regex_literal_groups_and_nested_grants():
+    profile = parse_sbpl_profile(
+        """
+(version 1)
+(deny default)
+(allow mach-lookup (require-any (global-name "com.apple.foo") (global-name "com.apple.bar")))
+(allow mach-lookup (global-name-regex #"^com\\.apple\\.(bluetooth|wifi).*"))
+""",
+        source="nested.sb",
+        name="nested",
+    )
+    assert profile is not None
+    assert "com.apple.foo" in profile.mach_lookup_allow
+    assert "com.apple.bar" in profile.mach_lookup_allow
+    assert "require-any" not in profile.mach_lookup_allow
+    assert "global-name" not in profile.mach_lookup_allow
+    assert any("bluetooth|wifi" in x for x in profile.mach_lookup_allow)
+    assert profile_grants_service(profile, "com.apple.wifid")
+    assert not profile_grants_service(profile, "com.apple.other")

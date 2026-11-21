@@ -91,6 +91,15 @@ def _tokenize(text: str) -> list[str]:
             i = j + 1
             continue
         if ch == "#":
+            if i + 1 < n and text[i + 1] == '"':
+                j = i + 2
+                regex_buf: list[str] = []
+                while j < n and text[j] != '"':
+                    regex_buf.append(text[j])
+                    j += 1
+                tokens.append("#" + "".join(regex_buf))
+                i = j + 1 if j < n else j
+                continue
             j = i + 1
             while j < n and not text[j].isspace() and text[j] not in "()":
                 j += 1
@@ -220,30 +229,36 @@ def parse_sbpl_profile(
 
 def _lookup_names(form: list[object]) -> set[str]:
     names: set[str] = set()
+
+    def add_regex(value: str) -> None:
+        pattern = value.strip()
+        if pattern.startswith("#"):
+            pattern = pattern[1:]
+        if len(pattern) >= 2 and pattern.startswith('"') and pattern.endswith('"'):
+            pattern = pattern[1:-1]
+        if pattern:
+            names.add(f"regex:{pattern}")
+
+    def walk(node: object) -> None:
+        if not isinstance(node, list):
+            return
+        if node and isinstance(node[0], str):
+            key = node[0]
+            if key in {"global-name", "local-name"}:
+                for value in node[1:]:
+                    if isinstance(value, str) and SERVICE_NAME_RE.match(value):
+                        names.add(value)
+                return
+            if key in {"global-name-regex", "local-name-regex"}:
+                for value in node[1:]:
+                    if isinstance(value, str):
+                        add_regex(value)
+                return
+        for child in node:
+            walk(child)
+
     for item in form[2:]:
-        if not isinstance(item, list):
-            continue
-        name_keys = {"global-name", "local-name", "global-name-regex", "local-name-regex"}
-        if len(item) >= 2 and item[0] in name_keys:
-            value = item[1]
-            if isinstance(value, str):
-                if item[0].endswith("regex"):
-                    pattern = value.strip()
-                    if pattern.startswith("#"):
-                        pattern = pattern[1:]
-                    if len(pattern) >= 2 and pattern.startswith('"') and pattern.endswith('"'):
-                        pattern = pattern[1:-1]
-                    names.add(f"regex:{pattern}")
-                elif SERVICE_NAME_RE.match(value):
-                    names.add(value)
-        for s in _strings(item):
-            if (
-                item
-                and isinstance(item[0], str)
-                and item[0].endswith("name")
-                and SERVICE_NAME_RE.match(s)
-            ):
-                names.add(s)
+        walk(item)
     return names
 
 
