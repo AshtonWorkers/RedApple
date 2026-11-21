@@ -30,7 +30,7 @@ from .runner import (
     run_dry_run,
     run_seed_coverage,
 )
-from .store import FoundryStore, JsonFoundryStore
+from .store import FoundryStore, JsonFoundryStore, LedgerFoundryStore
 from .synthesis import (
     HarnessSynthesizer,
     SynthesisRequest,
@@ -57,6 +57,7 @@ __all__ = [
     "HarnessSpec",
     "HarnessSynthesizer",
     "JsonFoundryStore",
+    "LedgerFoundryStore",
     "PARK_AFTER_ATTEMPTS",
     "ROLLBACK_BUDGET_MS",
     "SynthesisRequest",

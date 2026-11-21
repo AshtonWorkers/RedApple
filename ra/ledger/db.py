@@ -21,7 +21,7 @@ from .schema import SCHEMA_SQL
 from .states import ClaimState, can_transition
 
 CLAIM_TYPES = frozenset(
-    {"bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score"}
+    {"bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score", "harness"}
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
 WORK_ORDER_STATES = frozenset({"ready", "parked", "done"})
@@ -757,6 +757,16 @@ class LedgerStore:
             FROM claim WHERE state=? ORDER BY created, id LIMIT ?
             """,
             (state, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claims_by_type(self, claim_type: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT id, run_id, type, value_json, confidence, state, dedup_key, created
+            FROM claim WHERE type=? ORDER BY created, id LIMIT ?
+            """,
+            (claim_type, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 

@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Protocol
 
+from ..ledger import ArtifactInput, ClaimArtifactInput, ClaimInput, ClaimState, Ledger, UlidFactory
+from ..ledger.ids import now_ms
 from .models import FoundryState
 
 
@@ -73,3 +75,57 @@ class JsonFoundryStore:
     async def list_ids(self) -> list[str]:
         states = await asyncio.to_thread(self._read_all_sync)
         return sorted(states)
+
+
+class LedgerFoundryStore:
+    """Foundry state stored as bound harness claims in the claim ledger."""
+
+    def __init__(self, ledger: Ledger) -> None:
+        self._ledger = ledger
+        self._ids = UlidFactory()
+
+    async def load(self, harness_id: str) -> FoundryState | None:
+        claims = self._ledger.claims_by_type("harness", limit=10000)
+        latest: dict[str, object] | None = None
+        for claim in claims:
+            data = json.loads(str(claim["value_json"]))
+            if data.get("harness_id") != harness_id:
+                continue
+            if latest is None or int(str(latest["created"])) < int(str(claim["created"])):
+                latest = claim
+        if latest is None:
+            return None
+        return FoundryState.from_dict(json.loads(str(latest["value_json"])))
+
+    async def save(self, state: FoundryState) -> None:
+        state_json = json.dumps(state.to_dict(), sort_keys=True, separators=(",", ":"))
+        claim_id = self._ids.new("fs")
+        created = state.updated_at or now_ms()
+        await self._ledger.create_claim(
+            ClaimInput(
+                claim_id=claim_id,
+                type="harness",
+                value_json=state_json,
+                confidence=1.0,
+                dedup_key=f"harness_state:{state.harness_id}:{claim_id}",
+                created=created,
+                artifacts=(
+                    ClaimArtifactInput(
+                        artifact=ArtifactInput(
+                            kind="foundry_state",
+                            data=state_json.encode("utf-8"),
+                            ttl_class="run",
+                        ),
+                        role="state",
+                    ),
+                ),
+            )
+        )
+        await self._ledger.transition_claim(claim_id, ClaimState.BOUND)
+
+    async def list_ids(self) -> list[str]:
+        claims = self._ledger.claims_by_type("harness", limit=10000)
+        ids = {
+            str(json.loads(str(claim["value_json"]))["harness_id"]) for claim in claims
+        }
+        return sorted(ids)

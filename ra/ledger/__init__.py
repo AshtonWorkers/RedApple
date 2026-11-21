@@ -397,6 +397,10 @@ class Ledger:
         value = state.value if isinstance(state, ClaimState) else state
         return self.store.claims_by_state(value, limit=limit)
 
+    def claims_by_type(self, claim_type: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List claims of one type in creation order."""
+        return self.store.claims_by_type(claim_type, limit=limit)
+
     def claim_artifact_count(self, claim_id: str) -> int:
         """Count artifact links for a claim."""
         return self.store.claim_artifact_count(claim_id)
