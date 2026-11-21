@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import uuid
@@ -123,7 +124,7 @@ class MacOSVMLane(BaseLane):
                 details={"stderr": version.stderr[-500:]},
             )
 
-        listing = await self._runner.run(["tart", "list"], timeout_s=30)
+        listing = await self._runner.run(["tart", "list", "--format=json"], timeout_s=30)
         if listing.returncode != 0 or listing.timed_out:
             return self._provision_gap(
                 p,
@@ -189,11 +190,15 @@ class MacOSVMLane(BaseLane):
     async def _collect_crashes(self, handle: Handle) -> list[CrashRef]:
         vm = str(handle.metadata.get("vm") or self._vm_name_for(self._profile))
         if not await self._controller.is_running(vm):
-            return []
+            raise LaneError(LaneErrorCode.DEVICE_LOST, f"tart VM {vm} is not running")
         command = str(handle.harness.metadata.get("crash_command") or self._crash_command)
         res = await self._controller.exec(vm, ["zsh", "-lc", command], timeout_s=30)
         if res.returncode != 0 or res.timed_out:
-            return []
+            raise LaneError(
+                LaneErrorCode.DEVICE_LOST,
+                "macOS crash collection failed",
+                details={"vm": vm, "stderr": res.stderr[-500:]},
+            )
         refs: list[CrashRef] = []
         for line in res.stdout.splitlines():
             path = line.strip()
@@ -239,7 +244,9 @@ class MacOSVMLane(BaseLane):
         text = res.stdout.lower()
         if "critical" in text:
             return Thermal.CRITICAL
-        if "serious" in text or "warning" in text:
+        if "no thermal warning" in text or "no thermal warnings" in text:
+            return Thermal.NOMINAL
+        if "serious" in text or "thermal warning" in text:
             return Thermal.SERIOUS
         return Thermal.NOMINAL
 
@@ -257,9 +264,33 @@ class MacOSVMLane(BaseLane):
 
     @staticmethod
     def _vm_listed(stdout: str, vm: str) -> bool:
-        for line in stdout.splitlines():
+        text = stdout.strip()
+        if not text:
+            return False
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    name = item.get("Name") or item.get("name")
+                    if name == vm:
+                        return True
+            return False
+        if isinstance(data, dict):
+            for key in ("VMs", "vms", "Vms"):
+                items = data.get(key)
+                if isinstance(items, list):
+                    return any(
+                        isinstance(item, dict) and (item.get("Name") or item.get("name")) == vm
+                        for item in items
+                    )
+        for line in text.splitlines():
             parts = line.split()
-            if parts and parts[0] == vm:
+            if len(parts) >= 2 and parts[1] == vm:
+                return True
+            if len(parts) == 1 and parts[0] == vm:
                 return True
         return False
 

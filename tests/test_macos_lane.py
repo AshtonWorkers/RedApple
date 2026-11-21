@@ -17,7 +17,7 @@ from ra.lanes.base import (
     Tier,
 )
 from ra.lanes.commands import CommandResult
-from ra.lanes.macos.lane import MacOSVMLane
+from ra.lanes.macos import MacOSVMLane, TartVMController
 
 
 def cmd(argv, *, rc: int = 0, out: str = "", err: str = "", timed_out: bool = False) -> CommandResult:
@@ -58,6 +58,8 @@ class FakeTartController:
         crash_stdout: str = "",
         build_rc: int = 0,
         build_stderr: str = "",
+        crash_rc: int = 0,
+        pmset_stdout: str | None = None,
         thermal: Thermal = Thermal.NOMINAL,
     ) -> None:
         self.running = running
@@ -66,6 +68,8 @@ class FakeTartController:
         self.crash_stdout = crash_stdout
         self.build_rc = build_rc
         self.build_stderr = build_stderr
+        self.crash_rc = crash_rc
+        self.pmset_stdout = pmset_stdout
         self.thermal = thermal
         self.started: list[str] = []
         self.stopped: list[str] = []
@@ -97,9 +101,9 @@ class FakeTartController:
         if "build-webkit" in text:
             return cmd(argv, rc=self.build_rc, out="build ok\n" if self.build_rc == 0 else "", err=self.build_stderr)
         if "DiagnosticReports" in text or ".ips" in text:
-            return cmd(argv, out=self.crash_stdout)
+            return cmd(argv, rc=self.crash_rc, out=self.crash_stdout, err="crash collect failed" if self.crash_rc else "")
         if "pmset" in text:
-            return cmd(argv, out=f"{self.thermal.value}\n")
+            return cmd(argv, out=self.pmset_stdout if self.pmset_stdout is not None else f"{self.thermal.value}\n")
         return cmd(argv, rc=self.feed_rc, out="feed out\n", err="feed err\n")
 
     async def stop(self, vm: str) -> None:
@@ -145,7 +149,7 @@ class MacOSVMLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cards, [])
         self.assertEqual(result.details["vm"], "redapple-macos")
         self.assertIn(("tart", "--version"), runner.calls)
-        self.assertIn(("tart", "list"), runner.calls)
+        self.assertTrue(any(call[:2] == ("tart", "list") for call in runner.calls))
 
     async def test_missing_tart_parks_needs_hand_with_one_card(self) -> None:
         runner = FakeRunner()
@@ -241,6 +245,33 @@ class MacOSVMLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0].action, "provision_vm_tools")
         self.assertIn("sccache", cards[0].instruction)
+
+    async def test_tart_exec_forwards_stdin_with_dash_i(self) -> None:
+        runner = FakeRunner()
+        controller = TartVMController(runner)
+        await controller.exec("redapple-macos", ["feed-tool"], input_bytes=b"payload")
+        self.assertEqual(runner.calls, [("tart", "exec", "-i", "redapple-macos", "feed-tool")])
+
+    async def test_pmset_no_thermal_warning_is_nominal(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController(pmset_stdout="No thermal warning level has been recorded\n")
+        lane, _ = self.make_lane(runner, controller, sccache=False)
+        await lane.provision(self.make_profile())
+        self.assertIs(await lane.thermal(), Thermal.NOMINAL)
+        self.assertFalse(lane.paused)
+
+    async def test_crash_collection_failure_raises(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController(crash_rc=1)
+        lane, _ = self.make_lane(runner, controller, sccache=False)
+        await lane.provision(self.make_profile())
+        handle = await lane.launch(
+            "imageio", HarnessRef(name="h", argv=["feed-tool"], metadata={"build_webkit": False})
+        )
+        with self.assertRaises(LaneError) as cm:
+            await lane.collect_crashes(handle)
+        self.assertIs(cm.exception.code, LaneErrorCode.DEVICE_LOST)
+        self.assertFalse(handle.crashes_collected)
 
     async def test_thermal_reader_drives_critical_drain(self) -> None:
         runner = FakeRunner()
