@@ -130,6 +130,15 @@ class BaseLaneTest(unittest.IsolatedAsyncioTestCase):
             await self.lane.feed(self.handle, b"x")
         self.assertIs(cm.exception.code, LaneErrorCode.DEVICE_LOST)
 
+    async def test_feed_after_collect_requires_new_collection(self) -> None:
+        await self.lane.collect_crashes(self.handle)
+        await self.lane.feed(self.handle, b"more input")
+        with self.assertRaises(LaneError) as cm:
+            await self.lane.reset(self.handle)
+        self.assertIs(cm.exception.code, LaneErrorCode.FORMAT_FAIL)
+        await self.lane.collect_crashes(self.handle)
+        await self.lane.reset(self.handle)
+
     async def test_serious_thermal_pauses_work(self) -> None:
         self.lane.thermal_reading = Thermal.SERIOUS
         self.assertIs(await self.lane.thermal(), Thermal.SERIOUS)

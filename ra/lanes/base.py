@@ -355,6 +355,7 @@ class BaseLane(ABC):
         """Feed bytes to a handle, never blocking longer than 30 seconds."""
         self._check_handle(h)
         self._check_work_allowed()
+        h.crashes_collected = False
         try:
             result = await asyncio.wait_for(self._feed_bytes(h, data), timeout=self._feed_timeout_s)
         except TimeoutError:
