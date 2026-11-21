@@ -3,7 +3,7 @@
 PYTHON ?= python3.12
 
 test:
-	$(PYTHON) -m pytest tests/unit tests/golden tests/injection
+	$(PYTHON) -m pytest tests/unit tests/golden tests/injection tests/test_*.py
 
 lint:
 	ruff check ra tests scripts
@@ -15,7 +15,7 @@ typecheck:
 	mypy --strict ra
 
 coverage:
-	$(PYTHON) -m pytest tests/unit tests/golden tests/injection --cov=ra --cov-report=term-missing --cov-report=xml:coverage.xml
+	$(PYTHON) -m pytest tests/unit tests/golden tests/injection tests/test_*.py --cov=ra --cov-report=term-missing --cov-report=xml:coverage.xml
 	$(PYTHON) scripts/check_coverage.py coverage.xml
 
 golden:

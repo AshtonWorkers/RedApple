@@ -337,7 +337,7 @@ def layout_check(root: Path | None = None) -> list[str]:
     if ra_dir.exists():
         for path in ra_dir.rglob("*.py"):
             rel_path = path.relative_to(ra_dir)
-            if "fleet" in rel_path.parts:
+            if "fleet" in rel_path.parts or "lanes" in rel_path.parts:
                 continue
             text = path.read_text(encoding="utf-8")
             if lanes_import.search(text):

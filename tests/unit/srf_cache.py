@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Sequence, Tuple
 
 from ra.srf.dyld import IMAGES_COUNT, IMAGES_OFFSET, MAPPING_COUNT, MAPPING_OFFSET
 
@@ -12,8 +12,8 @@ VA_BASE = 0x100000000
 LC_SEGMENT_64 = 0x19
 MH_MAGIC_64 = 0xFEEDFACF
 
-SectionSpec = Tuple[str, str, bytes]
-ImageSpec = Tuple[str, Sequence[SectionSpec]]
+SectionSpec = tuple[str, str, bytes]
+ImageSpec = tuple[str, Sequence[SectionSpec]]
 
 
 def _align(value: int, alignment: int = 0x100) -> int:
@@ -29,7 +29,7 @@ def _section_bytes(segment: str, name: str, addr: int, size: int) -> bytes:
     return bytes(out)
 
 
-def _macho(sections: Sequence[Tuple[str, str, int, int]]) -> bytes:
+def _macho(sections: Sequence[tuple[str, str, int, int]]) -> bytes:
     nsects = len(sections)
     sizeofcmds = 72 + 80 * nsects
     data = bytearray(32 + sizeofcmds)
@@ -94,10 +94,10 @@ def write_minimal_cache(path: Path, images: Sequence[ImageSpec]) -> Path:
     macho_sizes = [32 + 72 + 80 * len(sections) for _path, sections in images]
     data_area = _align(macho_area + sum(macho_sizes))
 
-    data_offsets: List[List[int]] = []
+    data_offsets: list[list[int]] = []
     offset = data_area
     for _path, sections in images:
-        row: List[int] = []
+        row: list[int] = []
         for _segment, _name, data in sections:
             offset = _align(offset, 16)
             row.append(offset)
@@ -114,7 +114,7 @@ def write_minimal_cache(path: Path, images: Sequence[ImageSpec]) -> Path:
     struct.pack_into("<QQQII", buf, 0x400, VA_BASE, file_size, 0, 7, 5)
 
     macho_off = macho_area
-    for idx, ((image_path, sections), offsets) in enumerate(zip(images, data_offsets)):
+    for idx, ((image_path, sections), offsets) in enumerate(zip(images, data_offsets, strict=True)):
         path_off = path_area + idx * path_size
         encoded_path = image_path.encode("utf-8") + b"\0"
         if len(encoded_path) > path_size:
@@ -132,14 +132,14 @@ def write_minimal_cache(path: Path, images: Sequence[ImageSpec]) -> Path:
         buf[path_off : path_off + len(encoded_path)] = encoded_path
         macho_sections = [
             (segment, name, VA_BASE + data_off, len(data))
-            for (segment, name, data), data_off in zip(sections, offsets)
+            for (segment, name, data), data_off in zip(sections, offsets, strict=True)
         ]
         macho = _macho(macho_sections)
         buf[macho_off : macho_off + len(macho)] = macho
         macho_off += len(macho)
 
-    for (_path, sections), offsets in zip(images, data_offsets):
-        for (_segment, _name, data), data_off in zip(sections, offsets):
+    for (_path, sections), offsets in zip(images, data_offsets, strict=True):
+        for (_segment, _name, data), data_off in zip(sections, offsets, strict=True):
             if data:
                 buf[data_off : data_off + len(data)] = data
 
