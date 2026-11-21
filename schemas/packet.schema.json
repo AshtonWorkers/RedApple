@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ra:packet",
+  "type": "object",
+  "required": ["goal", "artifacts"],
+  "properties": {
+    "goal": {"type": "string"},
+    "artifacts": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+    "vocab": {"type": "array", "items": {"type": "string"}},
+    "exemplar": {"type": "string"},
+    "near_miss": {"type": "string"}
+  },
+  "additionalProperties": false
+}

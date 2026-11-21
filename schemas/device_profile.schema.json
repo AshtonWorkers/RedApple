@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ra:device_profile",
+  "type": "object",
+  "required": ["udid", "tier", "ring_node", "state"],
+  "properties": {
+    "udid": {"type": "string"},
+    "tier": {"enum": ["A", "B", "C"]},
+    "ring_node": {"type": "string"},
+    "state": {"type": "string"},
+    "build": {"type": ["string", "null"]},
+    "thermal": {"type": ["string", "null"]},
+    "crashes": {"type": "integer", "minimum": 0},
+    "exclusion_window": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

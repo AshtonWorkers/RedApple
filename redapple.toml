@@ -1,0 +1,15 @@
+[station]
+external_mount = "/tmp/redapple"
+max_vm_images = 2
+
+[budget]
+spend_usd = 40
+crashes_per_device = 400
+
+[model]
+primary = "deepseek-v4.1-flash"
+local_only = true
+
+[lane.ios]
+tier = "C"
+signing_cadence_days = 6

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redapple"
+version = "0.3.0"
+description = "RED APPLE autonomous Apple-platform vulnerability research factory"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "coverage>=7.6",
+  "mypy>=1.11",
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+ra = "ra.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["ra*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "load: load harness tests (run explicitly with make load)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.coverage.run]
+source = ["ra"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

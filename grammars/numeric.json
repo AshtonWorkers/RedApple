@@ -1,0 +1,1 @@
+{"$id":"ra:grammar:numeric","type":"object","required":["value"],"properties":{"value":{"type":"number"}},"additionalProperties":false}

@@ -1,0 +1,826 @@
+"""SQLite storage layer for the Claim Ledger.
+
+This is the only module that opens a database connection (RA-TOP-001). All writes
+are applied as batched transactions by the single-writer actor.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import sqlite3
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from ..errors import DuplicateDedup, FormatFail, RaError
+from .ids import UlidFactory  # noqa: F401  (re-exported for callers)
+from .models import ClaimInput
+from .operations import LedgerOperation
+from .schema import SCHEMA_SQL
+from .states import ClaimState, can_transition
+
+CLAIM_TYPES = frozenset(
+    {"bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score"}
+)
+TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
+RUN_MODES = frozenset({"macos", "ios"})
+RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})
+
+
+def _text(payload: Mapping[str, Any], key: str) -> str:
+    value = payload[key]
+    if not isinstance(value, str):
+        raise FormatFail(f"ledger payload {key} must be str")
+    return value
+
+
+def _opt_text(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise FormatFail(f"ledger payload {key} must be str or None")
+    return value
+
+
+def _int(payload: Mapping[str, Any], key: str) -> int:
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FormatFail(f"ledger payload {key} must be int")
+    return value
+
+
+def _float(payload: Mapping[str, Any], key: str) -> float:
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FormatFail(f"ledger payload {key} must be number")
+    return float(value)
+
+
+def _bool(payload: Mapping[str, Any], key: str) -> bool:
+    value = payload[key]
+    if not isinstance(value, bool):
+        raise FormatFail(f"ledger payload {key} must be bool")
+    return value
+
+
+def _list(payload: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
+    value = payload[key]
+    if not isinstance(value, list):
+        raise FormatFail(f"ledger payload {key} must be list")
+    out: list[Mapping[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise FormatFail(f"ledger payload {key} items must be objects")
+        out.append(item)
+    return out
+
+
+class LedgerStore:
+    """Synchronous SQLite store used only by the ledger actor."""
+
+    def __init__(self, path: str | Path, *, wal_autocheckpoint: int = 1000) -> None:
+        self.path = str(path)
+        self._wal_autocheckpoint = wal_autocheckpoint
+        if self.path != ":memory:":
+            Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self.path, isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+        self._configure()
+        self._initialize_schema()
+
+    def _configure(self) -> None:
+        pragmas = {
+            "foreign_keys": "ON",
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL",
+            "busy_timeout": "5000",
+            "cache_size": "-262144",
+            "mmap_size": "536870912",
+            "temp_store": "MEMORY",
+            "wal_autocheckpoint": str(self._wal_autocheckpoint),
+        }
+        for name, value in pragmas.items():
+            self._conn.execute(f"PRAGMA {name}={value}")
+
+    def _initialize_schema(self) -> None:
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='run'"
+        ).fetchone()
+        if row is None:
+            self._conn.executescript(SCHEMA_SQL)
+
+    def close(self) -> None:
+        """Close the SQLite connection."""
+        self._conn.close()
+
+    def apply_batch(self, operations: Sequence[LedgerOperation]) -> list[object]:
+        """Apply operations atomically; used only by the single-writer actor."""
+        if not operations:
+            return []
+        results: list[object] = []
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            for operation in operations:
+                results.append(self._apply_operation(operation))
+            self._conn.execute("COMMIT")
+        except Exception as exc:
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.execute("ROLLBACK")
+            for operation in operations:
+                self._set_future_exception(operation, exc)
+            raise
+        for operation, result in zip(operations, results, strict=True):
+            self._set_future_result(operation, result)
+        return results
+
+    @staticmethod
+    def _set_future_result(operation: LedgerOperation, result: object) -> None:
+        if operation.future is not None and not operation.future.done():
+            operation.future.set_result(result)
+
+    @staticmethod
+    def _set_future_exception(operation: LedgerOperation, exc: BaseException) -> None:
+        if operation.future is not None and not operation.future.done():
+            operation.future.set_exception(exc)
+
+    def _apply_operation(self, operation: LedgerOperation) -> object:
+        handler = getattr(self, f"_op_{operation.kind}", None)
+        if handler is None:
+            raise FormatFail(f"unknown ledger operation {operation.kind}")
+        return handler(operation.payload)
+
+    def _op_create_run(self, payload: Mapping[str, Any]) -> str:
+        run_id = _text(payload, "run_id")
+        mode = _text(payload, "mode")
+        state = _text(payload, "state")
+        if mode not in RUN_MODES:
+            raise FormatFail("run mode must be macos or ios")
+        if state not in RUN_STATES:
+            raise FormatFail("run state is invalid")
+        self._conn.execute(
+            "INSERT INTO run(id, started, ended, mode, budget_json, state) VALUES(?,?,?,?,?,?)",
+            (
+                run_id,
+                _int(payload, "started"),
+                payload.get("ended"),
+                mode,
+                _text(payload, "budget_json"),
+                state,
+            ),
+        )
+        return run_id
+
+    def _op_end_run(self, payload: Mapping[str, Any]) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE run SET ended=?, state=? WHERE id=?",
+            (_int(payload, "ended"), _text(payload, "state"), _text(payload, "run_id")),
+        )
+        return cursor.rowcount == 1
+
+    def _op_put_artifact(self, payload: Mapping[str, Any]) -> str:
+        artifact_id = _text(payload, "artifact_id")
+        kind = _text(payload, "kind")
+        sha256 = _text(payload, "sha256")
+        ttl_class = _text(payload, "ttl_class")
+        if ttl_class not in TTL_CLASSES:
+            raise FormatFail("artifact ttl_class is invalid")
+        if len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256):
+            raise FormatFail("artifact sha256 must be lowercase hex")
+        self._conn.execute(
+            """
+            INSERT INTO artifact(id, kind, sha256, bytes, created, ttl_class)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                artifact_id,
+                kind,
+                sha256,
+                _int(payload, "bytes"),
+                _int(payload, "created"),
+                ttl_class,
+            ),
+        )
+        return artifact_id
+
+    def _op_create_claim(self, payload: Mapping[str, Any]) -> str:
+        claim = _claim_input_from_payload(payload)
+        for link in claim["artifacts"]:
+            self._insert_artifact_row(link)
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO claim(id, run_id, type, value_json, confidence, state, dedup_key, created)
+                VALUES(?,?,?,?,?,'limbo',?,?)
+                """,
+                (
+                    claim["claim_id"],
+                    claim["run_id"],
+                    claim["type"],
+                    claim["value_json"],
+                    claim["confidence"],
+                    claim["dedup_key"],
+                    claim["created"],
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "ux_claim_dedup" in str(exc) or "dedup_key" in str(exc):
+                raise DuplicateDedup("claim dedup_key already exists") from exc
+            raise FormatFail(f"claim insert failed: {exc}") from exc
+        for link in claim["artifacts"]:
+            self._conn.execute(
+                "INSERT INTO claim_artifact(claim_id, artifact_id, role) VALUES(?,?,?)",
+                (claim["claim_id"], link["artifact_id"], link["role"]),
+            )
+        return str(claim["claim_id"])
+
+    def _op_transition_claim(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        return self._transition_claim(
+            _text(payload, "claim_id"), _text(payload, "to_state"), _int(payload, "created")
+        )
+
+    def _transition_claim(self, claim_id: str, to_state: str, created: int) -> dict[str, object]:
+        row = self._conn.execute("SELECT state FROM claim WHERE id=?", (claim_id,)).fetchone()
+        if row is None:
+            raise FormatFail("claim does not exist")
+        current = ClaimState(str(row["state"]))
+        target = ClaimState(to_state)
+        idem = self._conn.execute(
+            "SELECT 1 FROM idem WHERE entity='claim' AND entity_id=? AND to_state=?",
+            (claim_id, target.value),
+        ).fetchone()
+        if idem is not None:
+            return {
+                "claim_id": claim_id,
+                "from_state": current.value,
+                "to_state": target.value,
+                "changed": False,
+            }
+        if not can_transition(current, target):
+            raise FormatFail(f"illegal claim transition {current.value} -> {target.value}")
+        if current is ClaimState.LIMBO and target is ClaimState.BOUND:
+            count = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM claim_artifact WHERE claim_id=?", (claim_id,)
+            ).fetchone()
+            if int(count["n"]) == 0:
+                raise FormatFail("claim with zero artifact links cannot leave limbo")
+        self._conn.execute("UPDATE claim SET state=? WHERE id=?", (target.value, claim_id))
+        self._conn.execute(
+            "INSERT INTO audit(entity, entity_id, from_state, to_state, created) VALUES(?,?,?,?,?)",
+            ("claim", claim_id, current.value, target.value, created),
+        )
+        self._conn.execute(
+            "INSERT INTO idem(entity, entity_id, to_state, created) VALUES('claim',?,?,?)",
+            (claim_id, target.value, created),
+        )
+        return {
+            "claim_id": claim_id,
+            "from_state": current.value,
+            "to_state": target.value,
+            "changed": True,
+        }
+
+    def _op_record_decision(self, payload: Mapping[str, Any]) -> int:
+        cursor = self._conn.execute(
+            """
+            INSERT INTO decision(run_id, wo_id, trigger_metric, observed, expected, spent_usd_micro, created)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                _opt_text(payload, "run_id"),
+                _opt_text(payload, "wo_id"),
+                _text(payload, "trigger_metric"),
+                _float(payload, "observed"),
+                _text(payload, "expected"),
+                _int(payload, "spent_usd_micro"),
+                _int(payload, "created"),
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def _op_enqueue_work_order(self, payload: Mapping[str, Any]) -> str:
+        work_order_id = _text(payload, "work_order_id")
+        action = _text(payload, "action")
+        state = _text(payload, "state")
+        allowed = {
+            "retarget",
+            "reweight",
+            "spawn_subfactory",
+            "widen_dialect",
+            "force_groom",
+            "try_gadget_set",
+            "escalate_model",
+            "demote",
+            "park",
+        }
+        if action not in allowed:
+            raise FormatFail("work_order action is off-vocabulary")
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO work_order(id, run_id, action, unit, payload_json, ev_cost, state, created)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    work_order_id,
+                    _opt_text(payload, "run_id"),
+                    action,
+                    _text(payload, "unit"),
+                    _opt_text(payload, "payload_json"),
+                    _float(payload, "ev_cost"),
+                    state,
+                    _int(payload, "created"),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise FormatFail(f"work_order insert failed: {exc}") from exc
+        return work_order_id
+
+    def _op_update_work_order_state(self, payload: Mapping[str, Any]) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE work_order SET state=?, payload_json=COALESCE(?, payload_json) WHERE id=?",
+            (
+                _text(payload, "state"),
+                _opt_text(payload, "payload_json"),
+                _text(payload, "work_order_id"),
+            ),
+        )
+        return cursor.rowcount == 1
+
+    def _op_record_packet_log(self, payload: Mapping[str, Any]) -> str:
+        packet_id = _text(payload, "packet_id")
+        self._conn.execute(
+            """
+            INSERT INTO packet_log(id, run_id, task_type, sha, tokens_in, tokens_out, latency_ms,
+              schema_ok, bound_ok, relevance, created)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                packet_id,
+                _opt_text(payload, "run_id"),
+                _opt_text(payload, "task_type"),
+                _text(payload, "sha"),
+                payload.get("tokens_in"),
+                payload.get("tokens_out"),
+                payload.get("latency_ms"),
+                payload.get("schema_ok"),
+                payload.get("bound_ok"),
+                payload.get("relevance"),
+                _int(payload, "created"),
+            ),
+        )
+        return packet_id
+
+    def _op_upsert_ring_node(self, payload: Mapping[str, Any]) -> str:
+        node_id = _text(payload, "ring_node_id")
+        self._conn.execute(
+            """
+            INSERT INTO ring_node(id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET ipsw_sha=excluded.ipsw_sha, build=excluded.build,
+              xcode=excluded.xcode, sdk=excluded.sdk, webkit_commit=excluded.webkit_commit,
+              state=excluded.state, epoch=excluded.epoch
+            """,
+            (
+                node_id,
+                _text(payload, "ipsw_sha"),
+                _text(payload, "build"),
+                _text(payload, "xcode"),
+                _text(payload, "sdk"),
+                _text(payload, "webkit_commit"),
+                _text(payload, "state"),
+                _int(payload, "epoch"),
+            ),
+        )
+        return node_id
+
+    def _op_advance_ring(self, payload: Mapping[str, Any]) -> int:
+        epoch = _int(payload, "epoch")
+        nodes = _list(payload, "nodes")
+        ids: list[str] = []
+        for node in nodes:
+            ids.append(_text(node, "ring_node_id"))
+            self._op_upsert_ring_node(node)
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(
+                f"UPDATE ring_node SET state='retired' WHERE epoch < ? AND id NOT IN ({placeholders})",
+                (epoch, *ids),
+            )
+        else:
+            self._conn.execute("UPDATE ring_node SET state='retired' WHERE epoch < ?", (epoch,))
+        return epoch
+
+    def _op_upsert_device_profile(self, payload: Mapping[str, Any]) -> str:
+        udid = _text(payload, "udid")
+        self._conn.execute(
+            """
+            INSERT INTO device_profile(udid, build, tier, state, thermal, crashes, exclusion_window, ring_node)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(udid) DO UPDATE SET build=excluded.build, tier=excluded.tier,
+              state=excluded.state, thermal=excluded.thermal, crashes=excluded.crashes,
+              exclusion_window=excluded.exclusion_window, ring_node=excluded.ring_node
+            """,
+            (
+                udid,
+                _opt_text(payload, "build"),
+                _opt_text(payload, "tier"),
+                _text(payload, "state"),
+                _opt_text(payload, "thermal"),
+                _int(payload, "crashes"),
+                _opt_text(payload, "exclusion_window"),
+                _opt_text(payload, "ring_node"),
+            ),
+        )
+        return udid
+
+    def _op_insert_verdict(self, payload: Mapping[str, Any]) -> int:
+        cursor = self._conn.execute(
+            "INSERT INTO verdict(claim_id, reviewer, agree, reason, created) VALUES(?,?,?,?,?)",
+            (
+                _text(payload, "claim_id"),
+                _text(payload, "reviewer"),
+                1 if _bool(payload, "agree") else 0,
+                _opt_text(payload, "reason"),
+                _int(payload, "created"),
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def _op_insert_join(self, payload: Mapping[str, Any]) -> str:
+        join_id = _text(payload, "join_id")
+        self._conn.execute(
+            """
+            INSERT INTO "join"(id, a_claim, b_claim, invariants_json, reliability, lower_bound, state, created)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                join_id,
+                _text(payload, "a_claim"),
+                _text(payload, "b_claim"),
+                _text(payload, "invariants_json"),
+                payload.get("reliability"),
+                payload.get("lower_bound"),
+                _text(payload, "state"),
+                _int(payload, "created"),
+            ),
+        )
+        return join_id
+
+    def _op_insert_entry_point(self, payload: Mapping[str, Any]) -> str:
+        entry_id = _text(payload, "entry_point_id")
+        self._conn.execute(
+            """
+            INSERT INTO entry_point(id, name, reach_from_json, privilege_delta, parser_complexity, weight, ring_node)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                entry_id,
+                _text(payload, "name"),
+                _text(payload, "reach_from_json"),
+                _int(payload, "privilege_delta"),
+                _float(payload, "parser_complexity"),
+                _float(payload, "weight"),
+                _text(payload, "ring_node"),
+            ),
+        )
+        return entry_id
+
+    def _op_sweep_artifacts(self, payload: Mapping[str, Any]) -> int:
+        # Retention deletes are executed as part of a ledger batch so they share
+        # the single-writer mailbox and one transaction (RA-RET-003).
+        cursor = self._conn.execute(
+            "DELETE FROM artifact WHERE id IN (SELECT id FROM artifact WHERE ttl_class=? ORDER BY created, id LIMIT ?)",
+            (_text(payload, "ttl_class"), _int(payload, "limit")),
+        )
+        return int(cursor.rowcount)
+
+    def _op_delete_artifacts(self, payload: Mapping[str, Any]) -> int:
+        ids = _list(payload, "artifact_ids")
+        deleted = 0
+        for item in ids:
+            artifact_id_value = _text(item, "artifact_id")
+            row = self._conn.execute(
+                "SELECT ttl_class FROM artifact WHERE id=?", (artifact_id_value,)
+            ).fetchone()
+            if row is None or str(row["ttl_class"]) == "pinned":
+                continue
+            self._conn.execute(
+                "DELETE FROM claim_artifact WHERE artifact_id=?", (artifact_id_value,)
+            )
+            cursor = self._conn.execute("DELETE FROM artifact WHERE id=?", (artifact_id_value,))
+            deleted += int(cursor.rowcount)
+        return deleted
+
+    def _insert_artifact_row(self, artifact: Mapping[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO artifact(id, kind, sha256, bytes, created, ttl_class)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                _text(artifact, "artifact_id"),
+                _text(artifact, "kind"),
+                _text(artifact, "sha256"),
+                _int(artifact, "bytes"),
+                _int(artifact, "created"),
+                _text(artifact, "ttl_class"),
+            ),
+        )
+
+    # Read-side helpers (same connection, still no direct module access).
+    def get_claim(self, claim_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, run_id, type, value_json, confidence, state, dedup_key, created FROM claim WHERE id=?",
+            (claim_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def claim_by_dedup(self, dedup_key_value: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, run_id, type, value_json, confidence, state, dedup_key, created FROM claim WHERE dedup_key=?",
+            (dedup_key_value,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def claims_by_state(self, state: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT id, run_id, type, value_json, confidence, state, dedup_key, created
+            FROM claim WHERE state=? ORDER BY created, id LIMIT ?
+            """,
+            (state, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_artifact_count(self, claim_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM claim_artifact WHERE claim_id=?", (claim_id,)
+        ).fetchone()
+        return int(row["n"])
+
+    def claim_artifacts(self, claim_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT ca.claim_id, ca.artifact_id, ca.role, a.kind, a.sha256, a.bytes, a.created, a.ttl_class
+            FROM claim_artifact ca JOIN artifact a ON a.id = ca.artifact_id
+            WHERE ca.claim_id=? ORDER BY ca.artifact_id, ca.role
+            """,
+            (claim_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_work_order(self, work_order_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, run_id, action, unit, payload_json, ev_cost, state, created FROM work_order WHERE id=?",
+            (work_order_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def ready_work_orders(self, *, limit: int = 64) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT id, run_id, action, unit, payload_json, ev_cost, state, created
+            FROM work_order WHERE state='ready' ORDER BY ev_cost DESC, created, id LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def work_orders_for_unit(self, unit: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT id, run_id, action, unit, payload_json, ev_cost, state, created
+            FROM work_order WHERE unit=? ORDER BY created, id
+            """,
+            (unit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def spent_usd_micro(self, run_id: str | None = None) -> int:
+        if run_id is None:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(spent_usd_micro),0) AS n FROM decision"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(spent_usd_micro),0) AS n FROM decision WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def artifact_ttl_counts(self) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT ttl_class, COUNT(*) AS n FROM artifact GROUP BY ttl_class ORDER BY ttl_class"
+        ).fetchall()
+        return {str(row["ttl_class"]): int(row["n"]) for row in rows}
+
+    def oldest_artifact(self, ttl_class: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, kind, sha256, bytes, created, ttl_class FROM artifact WHERE ttl_class=? ORDER BY created, id LIMIT 1",
+            (ttl_class,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def ring_nodes(self) -> list[dict[str, Any]]:
+        """List ring nodes in epoch order."""
+        rows = self._conn.execute(
+            "SELECT id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch "
+            "FROM ring_node ORDER BY epoch, id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ring_node(self, node_id: str) -> dict[str, Any] | None:
+        """Fetch one ring node."""
+        row = self._conn.execute(
+            "SELECT id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch "
+            "FROM ring_node WHERE id=?",
+            (node_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def retention_candidates(
+        self, ttl_class: str, *, cutoff: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Artifacts eligible for retention deletion, oldest first (I12)."""
+        rows = self._conn.execute(
+            """
+            SELECT a.id, a.kind, a.sha256, a.bytes, a.created, a.ttl_class
+            FROM artifact a
+            WHERE a.ttl_class=? AND a.created < ?
+              AND NOT EXISTS (
+                SELECT 1 FROM claim_artifact ca
+                JOIN claim c ON c.id = ca.claim_id
+                WHERE ca.artifact_id = a.id
+                  AND (
+                    c.state = 'promoted'
+                    OR c.id IN (SELECT a_claim FROM "join" WHERE state='live')
+                    OR c.id IN (SELECT b_claim FROM "join" WHERE state='live')
+                  )
+              )
+            ORDER BY a.created, a.id
+            LIMIT ?
+            """,
+            (ttl_class, cutoff, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def artifact_count(self) -> int:
+        """Total artifact rows."""
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM artifact").fetchone()
+        return int(row["n"])
+
+    def invariant_counts(self) -> dict[str, int]:
+        """Database-checkable invariant violation counts (I1-I4, I6)."""
+        counts: dict[str, int] = {}
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM claim c
+            WHERE c.state='promoted'
+              AND NOT EXISTS (SELECT 1 FROM claim_artifact ca WHERE ca.claim_id=c.id)
+            """
+        ).fetchone()
+        counts["i1"] = int(row["n"])
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM artifact WHERE id <> ('art_' || sha256)"
+        ).fetchone()
+        counts["i2"] = int(row["n"])
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM audit a
+            WHERE a.entity='claim' AND a.to_state IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM idem i
+                WHERE i.entity=a.entity AND i.entity_id=a.entity_id AND i.to_state=a.to_state
+              )
+            """
+        ).fetchone()
+        counts["i3"] = int(row["n"])
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM decision WHERE typeof(spent_usd_micro) <> 'integer'"
+        ).fetchone()
+        counts["i4"] = int(row["n"])
+        plans = [
+            (
+                "SELECT id, run_id, type, value_json, confidence, state, dedup_key, created "
+                "FROM claim WHERE state=? ORDER BY created, id LIMIT ?",
+                ("reviewed", 10),
+                "claim",
+            ),
+            (
+                "SELECT id, run_id, type, value_json, confidence, state, dedup_key, created "
+                "FROM claim WHERE dedup_key=?",
+                ("missing",),
+                "claim",
+            ),
+            (
+                "SELECT id, run_id, action, unit, payload_json, ev_cost, state, created "
+                "FROM work_order WHERE state='ready' ORDER BY ev_cost DESC, created, id LIMIT ?",
+                (64,),
+                "work_order",
+            ),
+        ]
+        scans = 0
+        for sql, params, table in plans:
+            details = self.explain(sql, params)
+            if any(f"SCAN {table}" in detail.upper() for detail in details):
+                scans += 1
+        counts["i6"] = scans
+        return counts
+
+    def explain(self, sql: str, params: Sequence[object] = ()) -> list[str]:
+        """Return EXPLAIN QUERY PLAN detail strings for CI index assertions."""
+        rows = self._conn.execute("EXPLAIN QUERY PLAN " + sql, tuple(params)).fetchall()
+        return [str(row["detail"]) for row in rows]
+
+    def counts(self) -> dict[str, int]:
+        tables = [
+            "run",
+            "artifact",
+            "claim",
+            "claim_artifact",
+            "verdict",
+            "join",
+            "work_order",
+            "decision",
+            "idem",
+            "entry_point",
+            "ring_node",
+            "device_profile",
+            "golden_row",
+            "packet_log",
+            "audit",
+        ]
+        out: dict[str, int] = {}
+        for table in tables:
+            row = self._conn.execute(f'SELECT COUNT(*) AS n FROM "{table}"').fetchone()
+            out[table] = int(row["n"])
+        return out
+
+    def table_names(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        return [str(row["name"]) for row in rows]
+
+    def index_names(self, table: str) -> list[str]:
+        rows = self._conn.execute(f"PRAGMA index_list({table})").fetchall()
+        return [str(row["name"]) for row in rows]
+
+    def pragma_value(self, name: str) -> object:
+        row = self._conn.execute(f"PRAGMA {name}").fetchone()
+        if row is None:
+            return None
+        return row[0]
+
+    def integrity_check(self) -> str:
+        row = self._conn.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0])
+
+
+def claim_input_to_payload(
+    claim: ClaimInput, artifacts: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Serialize a ClaimInput plus resolved artifact rows for the ledger operation."""
+    return {
+        "claim_id": claim.claim_id,
+        "run_id": claim.run_id,
+        "type": claim.type,
+        "value_json": claim.value_json,
+        "confidence": claim.confidence,
+        "dedup_key": claim.dedup_key,
+        "created": claim.created,
+        "artifacts": list(artifacts),
+    }
+
+
+def _claim_input_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    claim_type = _text(payload, "type")
+    if claim_type not in CLAIM_TYPES:
+        raise FormatFail("claim type is off-vocabulary")
+    confidence = _float(payload, "confidence")
+    if not 0.0 <= confidence <= 1.0:
+        raise FormatFail("claim confidence must be in [0,1]")
+    try:
+        json.loads(_text(payload, "value_json"))
+    except json.JSONDecodeError as exc:
+        raise FormatFail("claim value_json must be JSON") from exc
+    artifacts = _list(payload, "artifacts")
+    if not artifacts:
+        raise FormatFail("claim requires at least one artifact link")
+    return {
+        "claim_id": _text(payload, "claim_id"),
+        "run_id": _opt_text(payload, "run_id"),
+        "type": claim_type,
+        "value_json": _text(payload, "value_json"),
+        "confidence": confidence,
+        "dedup_key": _text(payload, "dedup_key"),
+        "created": _int(payload, "created"),
+        "artifacts": artifacts,
+    }
+
+
+__all__ = ["LedgerStore", "ClaimInput", "claim_input_to_payload", "RaError"]

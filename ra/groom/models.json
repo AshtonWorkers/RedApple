@@ -1,0 +1,22 @@
+{
+  "format": "heif",
+  "models": {
+    "libpas_size_classes": {
+      "provenance": "https://github.com/apple-oss-distributions/libpas",
+      "classes_kb": [16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
+      "notes": "Allocator-aware grooming steers by size class, never absolute address."
+    },
+    "gigacage": {
+      "provenance": "https://developer.apple.com/documentation/security/cage-based-hardware-assisted-heap-protection",
+      "cages": ["typed_array", "primitive", "js_value"]
+    },
+    "isoheap": {
+      "provenance": "https://github.com/apple-oss-distributions/xnu",
+      "notes": "Per-type isolation changes heap layout and grooming order."
+    },
+    "structure_id": {
+      "provenance": "https://github.com/apple-oss-distributions/JavaScriptCore",
+      "notes": "StructureID transitions constrain type-confusion groom windows."
+    }
+  }
+}

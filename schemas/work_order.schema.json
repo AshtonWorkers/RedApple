@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ra:work_order",
+  "type": "object",
+  "required": ["id", "action", "unit", "ev_cost"],
+  "properties": {
+    "id": {"type": "string"},
+    "action": {"enum": ["retarget", "reweight", "spawn_subfactory", "widen_dialect", "force_groom", "try_gadget_set", "escalate_model", "demote", "park"]},
+    "unit": {"type": "string"},
+    "ev_cost": {"type": "number", "exclusiveMinimum": 0},
+    "payload": {"type": ["object", "null"]}
+  },
+  "additionalProperties": false
+}

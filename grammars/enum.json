@@ -1,0 +1,1 @@
+{"$id":"ra:grammar:enum","type":"object","required":["answer"],"properties":{"answer":{"type":"string"}},"additionalProperties":false}

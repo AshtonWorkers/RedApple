@@ -1,0 +1,8 @@
+{
+  "id": "deepseek-v4.1-flash",
+  "provider": "deepseek",
+  "endpoint": "https://api.deepseek.com",
+  "role": "primary_press_model",
+  "local_only_fallback": true,
+  "notes": "Hardware-free M0 uses offline replay; live egress requires DEEPSEEK_API_KEY."
+}
