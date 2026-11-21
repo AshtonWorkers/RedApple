@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ra:groom-dialect",
+  "title": "RED APPLE groom dialect",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "pre_seed", "victim_pad", "victim_class", "post", "validator"],
+  "properties": {
+    "format": {"type": "string", "minLength": 1},
+    "pre_seed": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["box"],
+        "properties": {
+          "box": {"type": "string", "pattern": "^[a-z0-9]{4}$"},
+          "pad_to_class": {"type": "string", "pattern": "^kalloc_[0-9]+$"},
+          "count": {"type": "integer", "minimum": 1, "maximum": 64}
+        }
+      }
+    },
+    "victim_pad": {"type": "string", "enum": ["align_to_class", "pad_to_class"]},
+    "victim_class": {"type": "string", "pattern": "^kalloc_[0-9]+$"},
+    "post": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["free"],
+      "properties": {
+        "free": {"type": "string", "minLength": 1}
+      }
+    },
+    "validator": {"type": "string", "enum": ["heap_diff.class_stable"]}
+  }
+}

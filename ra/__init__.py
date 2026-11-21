@@ -1,0 +1,1 @@
+"""RED APPLE Python package."""
