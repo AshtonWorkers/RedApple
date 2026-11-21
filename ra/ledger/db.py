@@ -24,6 +24,12 @@ CLAIM_TYPES = frozenset(
     {"bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score"}
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
+WORK_ORDER_STATES = frozenset({"ready", "parked", "done"})
+WORK_ORDER_TRANSITIONS: dict[str, frozenset[str]] = {
+    "ready": frozenset({"parked", "done"}),
+    "parked": frozenset(),
+    "done": frozenset(),
+}
 RUN_MODES = frozenset({"macos", "ios"})
 RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})
 _MISSING: Any = object()
@@ -312,6 +318,9 @@ class LedgerStore:
         }
 
     def _op_record_decision(self, payload: Mapping[str, Any]) -> int:
+        spent = _int(payload, "spent_usd_micro")
+        if spent < 0:
+            raise FormatFail("spent_usd_micro must be non-negative")
         cursor = self._conn.execute(
             """
             INSERT INTO decision(run_id, wo_id, trigger_metric, observed, expected, spent_usd_micro, created)
@@ -323,7 +332,7 @@ class LedgerStore:
                 _text(payload, "trigger_metric"),
                 _float(payload, "observed"),
                 _text(payload, "expected"),
-                _int(payload, "spent_usd_micro"),
+                spent,
                 _int(payload, "created"),
             ),
         )
@@ -346,6 +355,8 @@ class LedgerStore:
         }
         if action not in allowed:
             raise FormatFail("work_order action is off-vocabulary")
+        if state not in WORK_ORDER_STATES:
+            raise FormatFail("work_order state is invalid")
         try:
             self._conn.execute(
                 """
@@ -368,12 +379,24 @@ class LedgerStore:
         return work_order_id
 
     def _op_update_work_order_state(self, payload: Mapping[str, Any]) -> bool:
+        work_order_id = _text(payload, "work_order_id")
+        state = _text(payload, "state")
+        if state not in WORK_ORDER_STATES:
+            raise FormatFail("work_order state is invalid")
+        row = self._conn.execute(
+            "SELECT state FROM work_order WHERE id=?", (work_order_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        current = str(row["state"])
+        if current != state and state not in WORK_ORDER_TRANSITIONS.get(current, frozenset()):
+            raise FormatFail(f"work_order transition {current} -> {state} is not allowed")
         cursor = self._conn.execute(
             "UPDATE work_order SET state=?, payload_json=COALESCE(?, payload_json) WHERE id=?",
             (
-                _text(payload, "state"),
+                state,
                 _opt_text(payload, "payload_json"),
-                _text(payload, "work_order_id"),
+                work_order_id,
             ),
         )
         return cursor.rowcount == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -255,6 +256,14 @@ class PressHarness:
             return
 
 
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
 def validate_output(
     task_type: TaskType, grammar: str, text: str, vocab: tuple[str, ...]
 ) -> dict[str, Any]:
@@ -279,8 +288,8 @@ def validate_output(
         return {"answer": answer}
     if grammar == "numeric":
         number = value.get("value")
-        if isinstance(number, bool) or not isinstance(number, (int, float)):
-            raise FormatFail("numeric output requires value")
+        if not _finite_number(number):
+            raise FormatFail("numeric output requires finite value")
         return {"value": number}
     if grammar == "code":
         code = value.get("code")
@@ -297,7 +306,7 @@ def validate_output(
         if not isinstance(path, list) or not all(isinstance(item, str) for item in path):
             raise FormatFail("path output requires path list")
         cost = value.get("cost", 0)
-        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
-            raise FormatFail("path output requires numeric cost")
+        if not _finite_number(cost):
+            raise FormatFail("path output requires finite numeric cost")
         return {"path": path, "cost": cost}
     raise FormatFail(f"unknown grammar {grammar}")

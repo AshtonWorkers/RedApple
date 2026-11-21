@@ -186,6 +186,8 @@ class Ledger:
         """Record a policy decision; money is integer micro-USD (I4)."""
         if isinstance(spent_usd_micro, bool) or not isinstance(spent_usd_micro, int):
             raise FormatFail("spent_usd_micro must be int")
+        if spent_usd_micro < 0:
+            raise FormatFail("spent_usd_micro must be non-negative")
         result = await self._submit(
             "record_decision",
             {

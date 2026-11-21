@@ -37,12 +37,12 @@ CREATE TABLE work_order(id TEXT PRIMARY KEY, run_id TEXT REFERENCES run(id),
   action TEXT NOT NULL CHECK(action IN ('retarget','reweight','spawn_subfactory',
     'widen_dialect','force_groom','try_gadget_set','escalate_model','demote','park')),
   unit TEXT NOT NULL, payload_json TEXT, ev_cost REAL NOT NULL,
-  state TEXT NOT NULL, created INT NOT NULL);
+  state TEXT NOT NULL CHECK(state IN ('ready','parked','done')), created INT NOT NULL);
 CREATE INDEX ix_wo_state ON work_order(state, created);
 
 CREATE TABLE decision(id INTEGER PRIMARY KEY, run_id TEXT, wo_id TEXT,
   trigger_metric TEXT NOT NULL, observed REAL NOT NULL, expected TEXT NOT NULL,
-  spent_usd_micro INT NOT NULL, created INT NOT NULL);
+  spent_usd_micro INT NOT NULL CHECK(spent_usd_micro >= 0), created INT NOT NULL);
 
 CREATE TABLE idem(entity TEXT NOT NULL, entity_id TEXT NOT NULL, to_state TEXT NOT NULL,
   created INT NOT NULL, PRIMARY KEY(entity, entity_id, to_state));

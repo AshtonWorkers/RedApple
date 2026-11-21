@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +62,26 @@ class PolicyEngine:
         self.executor = Executor(caps)
         self._failures: dict[str, int] = {}
 
+    @staticmethod
+    def _validate_plan_inputs(
+        probability_join: float, chain_bonus: float, ingress_weight: float
+    ) -> None:
+        if (
+            isinstance(probability_join, bool)
+            or not isinstance(probability_join, (int, float))
+            or not math.isfinite(probability_join)
+            or not 0.0 <= probability_join <= 1.0
+        ):
+            raise FormatFail("probability_join must be a finite number in [0,1]")
+        for name, value in (("chain_bonus", chain_bonus), ("ingress_weight", ingress_weight)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise FormatFail(f"{name} must be a finite non-negative number")
+
     async def plan_action(
         self,
         action: str,
@@ -78,13 +99,14 @@ class PolicyEngine:
         parsed = parse_action(action)
         if self._failures.get(unit, 0) >= 3 and parsed is not Action.PARK:
             parsed = Action.PARK
+        self._validate_plan_inputs(probability_join, chain_bonus, ingress_weight)
         cost = ACTION_COST_USD_MICRO[parsed]
         ev = (
             (probability_join * chain_bonus * ingress_weight) / cost
             if cost > 0
             else probability_join * chain_bonus * ingress_weight
         )
-        if ev <= 0:
+        if not math.isfinite(ev) or ev <= 0:
             raise FormatFail("work_order ev_cost must be > 0")
         payload = json.dumps(
             {

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import urllib.error
@@ -512,6 +513,92 @@ def test_sweep_artifacts_respects_pinned_and_claim_links():
             )
             assert await ledger.sweep_artifacts("run", limit=10) == 0
             assert ledger.artifact_count() == 3
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
+def test_validate_output_rejects_non_finite_numbers():
+    for raw in ('{"value": NaN}', '{"value": Infinity}', '{"value": -Infinity}'):
+        with pytest.raises(FormatFail):
+            validate_output(TaskType.GROOM_FILL, "numeric", raw, ())
+    with pytest.raises(FormatFail):
+        validate_output(TaskType.CHAIN_STRATEGY, "path", '{"path":["a"],"cost":NaN}', ())
+
+
+def test_record_decision_rejects_negative_spend():
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            with pytest.raises(FormatFail):
+                await ledger.record_decision(
+                    trigger_metric="t",
+                    observed=1.0,
+                    expected="x",
+                    spent_usd_micro=-5000,
+                    created=1,
+                )
+            assert ledger.spent_usd_micro() == 0
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
+def test_work_order_state_validation_and_transitions():
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            with pytest.raises(FormatFail):
+                await ledger.enqueue_work_order(
+                    action="park", unit="u", ev_cost=1.0, state="bogus", created=1
+                )
+            wid = await ledger.enqueue_work_order(
+                action="park", unit="u", ev_cost=1.0, state="ready", created=1
+            )
+            with pytest.raises(FormatFail):
+                await ledger.update_work_order_state(wid, "bogus")
+            assert await ledger.update_work_order_state(wid, "parked") is True
+            with pytest.raises(FormatFail):
+                await ledger.update_work_order_state(wid, "done")
+            assert ledger.get_work_order(wid)["state"] == "parked"
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
+def test_policy_dispatch_ready_concurrent_single_dispatch():
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            engine = PolicyEngine(ledger, ExecutorCaps(spend_usd_micro=1_000_000))
+            wid = await engine.plan_action("retarget", "race", probability_join=1.0)
+            results = await asyncio.gather(engine.dispatch_ready(), engine.dispatch_ready())
+            assert sum(dispatched for dispatched, _refusals in results) == 1
+            assert ledger.get_work_order(wid)["state"] == "done"
+            assert ledger.spent_usd_micro() == ACTION_COST_USD_MICRO[Action.RETARGET]
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
+def test_actor_batch_contains_per_operation_failure():
+    async def body():
+        ledger = await Ledger.open(":memory:", max_batch_ms=1000, max_batch_rows=10)
+        try:
+            results = await asyncio.gather(
+                ledger.create_run("macos"),
+                ledger.enqueue_work_order(action="bogus", unit="u", ev_cost=1.0),
+                return_exceptions=True,
+            )
+            assert isinstance(results[0], str)
+            assert isinstance(results[1], FormatFail)
+            counts = ledger.counts()
+            assert counts["run"] == 1
+            assert counts["work_order"] == 0
         finally:
             await ledger.close()
 

@@ -92,3 +92,29 @@ def test_RA_POL_005_budget_gate_zero_ev_rejected():
             await ledger.close()
 
     run(body())
+
+
+def test_policy_plan_action_rejects_bad_probability_and_bonus():
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            engine = PolicyEngine(ledger, ExecutorCaps(spend_usd_micro=1_000_000))
+            with pytest.raises(FormatFail):
+                await engine.plan_action("retarget", "bad", probability_join=2.0)
+            with pytest.raises(FormatFail):
+                await engine.plan_action("retarget", "bad", probability_join=float("nan"))
+            with pytest.raises(FormatFail):
+                await engine.plan_action("retarget", "bad", probability_join=-0.1)
+            with pytest.raises(FormatFail):
+                await engine.plan_action(
+                    "retarget", "bad", probability_join=0.5, chain_bonus=-1.0
+                )
+            with pytest.raises(FormatFail):
+                await engine.plan_action(
+                    "retarget", "bad", probability_join=0.5, ingress_weight=float("inf")
+                )
+            assert ledger.ready_work_orders() == []
+        finally:
+            await ledger.close()
+
+    run(body())
