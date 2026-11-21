@@ -63,6 +63,10 @@ class AcceptanceMeasurements:
     dry_run_seconds: float = 600.0
     compile_seconds: float = 0.0
     dry_run_completed: bool = True
+    throughput_metric: str = "exec_per_sec_proxy"
+    throughput_caveat: str = (
+        "TODO(RA-FND-001): replace exec/sec proxy with new-coverage edges/sec."
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -74,6 +78,8 @@ class AcceptanceMeasurements:
             "dry_run_seconds": self.dry_run_seconds,
             "compile_seconds": self.compile_seconds,
             "dry_run_completed": self.dry_run_completed,
+            "throughput_metric": self.throughput_metric,
+            "throughput_caveat": self.throughput_caveat,
         }
 
 

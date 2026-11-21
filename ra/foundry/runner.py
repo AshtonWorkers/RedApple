@@ -38,7 +38,7 @@ class DryRunResult:
     completed: bool
     returncode: int
     seconds: float
-    edges_per_sec: float
+    exec_per_sec: float
     output: str
 
 
@@ -172,7 +172,7 @@ def run_dry_run(
         completed=completed_ok,
         returncode=returncode,
         seconds=elapsed,
-        edges_per_sec=parse_average_exec_per_sec(output),
+        exec_per_sec=parse_average_exec_per_sec(output),
         output=output,
     )
 
@@ -196,6 +196,11 @@ def measure_harness(
     )
     compile_result = compile_harness(spec, manifest, workdir, clangxx=clangxx)
     parser_malloc_symbol = str(manifest.get("parser_malloc_symbol") or "parser_malloc")
+    throughput_metric = str(manifest.get("throughput_metric") or "exec_per_sec_proxy")
+    throughput_caveat = str(
+        manifest.get("throughput_caveat")
+        or "TODO(RA-FND-001): replace exec/sec proxy with new-coverage edges/sec."
+    )
     if not compile_result.compiled:
         return AcceptanceMeasurements(
             compiled=False,
@@ -206,17 +211,21 @@ def measure_harness(
             dry_run_seconds=0.0,
             compile_seconds=compile_result.seconds,
             dry_run_completed=False,
+            throughput_metric=throughput_metric,
+            throughput_caveat=throughput_caveat,
         )
 
     binary = workdir / str(manifest.get("output") or f"{spec.id}_fuzzer")
     dry_run = run_dry_run(binary, corpus_dir, seconds)
     return AcceptanceMeasurements(
         compiled=True,
-        edges_per_sec=dry_run.edges_per_sec,
+        edges_per_sec=dry_run.exec_per_sec,
         surface_median_edges_per_sec=surface_median_edges_per_sec,
         coverage_map=dry_run.output,
         parser_malloc_symbol=parser_malloc_symbol,
         dry_run_seconds=seconds,
         compile_seconds=compile_result.seconds,
         dry_run_completed=dry_run.completed,
+        throughput_metric=throughput_metric,
+        throughput_caveat=throughput_caveat,
     )

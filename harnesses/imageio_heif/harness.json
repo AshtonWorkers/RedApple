@@ -20,5 +20,7 @@
   "seed_corpus": "corpus",
   "dry_run_seconds": 600,
   "surface_median_edges_per_sec": 1000.0,
+  "throughput_metric": "exec_per_sec_proxy",
+  "throughput_caveat": "TODO(RA-FND-001): exec/sec is a proxy for coverage edges/sec; replace with new-coverage edges/sec from libFuzzer cov growth.",
   "parser_malloc_symbol": "parser_malloc"
 }

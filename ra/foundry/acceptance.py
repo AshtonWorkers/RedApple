@@ -55,10 +55,12 @@ def evaluate_acceptance(measurements: AcceptanceMeasurements) -> AcceptanceDecis
         reasons.append("compiles: harness did not compile or dry run did not complete")
     if not checks["edges_sec_ge_60pct_surface_median"]:
         reasons.append(
-            "edges_sec_ge_60pct_surface_median: "
+            "edges_sec_ge_60pct_surface_median "
+            f"[{measurements.throughput_metric}]: "
             f"{measurements.edges_per_sec} < "
             f"{0.6 * measurements.surface_median_edges_per_sec} "
-            f"(median {measurements.surface_median_edges_per_sec})"
+            f"(median {measurements.surface_median_edges_per_sec}; "
+            f"{measurements.throughput_caveat})"
         )
     if not checks["parser_malloc_in_coverage"]:
         reasons.append(
