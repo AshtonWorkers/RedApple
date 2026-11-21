@@ -80,8 +80,12 @@ class TartVMController:
         input_bytes: bytes | None = None,
     ) -> CommandResult:
         """Execute argv inside the guest through ``tart exec``."""
+        command = ["tart", "exec"]
+        if input_bytes is not None:
+            command.append("-i")
+        command.extend([vm, *argv])
         return await self._runner.run(
-            ["tart", "exec", vm, *argv],
+            command,
             timeout_s=timeout_s,
             input_bytes=input_bytes,
         )
