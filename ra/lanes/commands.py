@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import time
 from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
@@ -64,6 +65,7 @@ class SubprocessRunner:
             stdin=stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -71,12 +73,12 @@ class SubprocessRunner:
             )
             timed_out = False
         except TimeoutError:
-            proc.kill()
+            self._kill_process_group(proc)
             await proc.wait()
             stdout_b, stderr_b = await proc.communicate()
             timed_out = True
         except asyncio.CancelledError:
-            proc.kill()
+            self._kill_process_group(proc)
             await proc.wait()
             raise
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -88,3 +90,13 @@ class SubprocessRunner:
             duration_ms=duration_ms,
             timed_out=timed_out,
         )
+
+    @staticmethod
+    def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+        """Kill the child's process group so descendants cannot hold pipes open."""
+        if proc.returncode is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
