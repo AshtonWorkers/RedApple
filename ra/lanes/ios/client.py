@@ -11,10 +11,18 @@ from __future__ import annotations
 import plistlib
 import time
 import uuid
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
-from ra.lanes.base import CrashRef, FeedResult, LaneError, LaneErrorCode, Thermal
+from ra.lanes.base import (
+    CrashRef,
+    FeedResult,
+    FeedStatus,
+    LaneError,
+    LaneErrorCode,
+    Thermal,
+)
 from ra.lanes.commands import CommandResult, CommandRunner, SubprocessRunner
 
 
@@ -75,7 +83,7 @@ class JscTransport(Protocol):
 
     async def open(self, handle: Any) -> None: ...
 
-    async def eval(self, handle: Any, data: bytes) -> FeedResult | str: ...
+    async def eval(self, handle: Any, data: bytes) -> FeedResult | FeedStatus | str: ...
 
     async def close(self, handle: Any) -> None: ...
 

@@ -10,6 +10,7 @@ from ra.lanes.base import (
     CrashRef,
     DeviceProfile,
     FeedResult,
+    FeedStatus,
     HarnessRef,
     HumanCard,
     LaneError,
@@ -44,6 +45,11 @@ class FakeAttachClient:
         install_error: LaneErrorCode | None = None,
         sign_install_error: LaneError | None = None,
         renew_error: LaneError | None = None,
+        check_error: LaneError | None = None,
+        mount_error: LaneError | None = None,
+        probe_error: LaneError | None = None,
+        release_error: LaneError | None = None,
+        renew_no_expiry: bool = False,
         capabilities=frozenset({"javascriptcore"}),
         signing_expires_ms: int | None = None,
         signing_renewals: int = 0,
@@ -59,6 +65,11 @@ class FakeAttachClient:
         self.install_error = install_error
         self.sign_install_error = sign_install_error
         self.renew_error = renew_error
+        self.check_error = check_error
+        self.mount_error = mount_error
+        self.probe_error = probe_error
+        self.release_error = release_error
+        self.renew_no_expiry = renew_no_expiry
         self.capabilities = frozenset(capabilities)
         self.signing_expires_ms = signing_expires_ms
         self.signing_renewals = signing_renewals
@@ -88,10 +99,14 @@ class FakeAttachClient:
 
     async def check_trust_dev_mode(self, info: IosDeviceInfo) -> IosDeviceInfo:
         self.calls.append("check_trust_dev_mode")
+        if self.check_error is not None:
+            raise self.check_error
         return replace(info, trusted=self.trusted, developer_mode=self.developer_mode)
 
     async def mount_ddi(self, info: IosDeviceInfo) -> IosDeviceInfo:
         self.calls.append("mount_ddi")
+        if self.mount_error is not None:
+            raise self.mount_error
         return replace(info, ddi_mounted=self.ddi_mounted)
 
     async def sign_install(self, info: IosDeviceInfo) -> IosInstallResult:
@@ -108,6 +123,8 @@ class FakeAttachClient:
 
     async def probe_capabilities(self, info: IosDeviceInfo) -> frozenset[str]:
         self.calls.append("probe_capabilities")
+        if self.probe_error is not None:
+            raise self.probe_error
         return self.capabilities
 
     async def collect_crashes(self, info: IosDeviceInfo) -> list[CrashRef]:
@@ -127,6 +144,8 @@ class FakeAttachClient:
             raise self.renew_error
         if not self.renew_ok:
             return IosInstallResult(ok=False, error_code=LaneErrorCode.SIGNING_EXPIRED, message="renew failed")
+        if self.renew_no_expiry:
+            return IosInstallResult(ok=True, signing_expires_ms=None)
         return IosInstallResult(
             ok=True,
             signing_expires_ms=int(time.time() * 1000) + 7 * 24 * 60 * 60 * 1000,
@@ -135,11 +154,19 @@ class FakeAttachClient:
     async def release_udid(self, info: IosDeviceInfo, reason: str) -> None:
         self.calls.append("release_udid")
         self.release_reasons.append(reason)
+        if self.release_error is not None:
+            raise self.release_error
 
 
 class FakeJscTransport:
-    def __init__(self, result: FeedResult | str = FeedResult.ACCEPTED) -> None:
+    def __init__(
+        self,
+        result: FeedResult | FeedStatus | str = FeedStatus.ACCEPTED,
+        *,
+        close_error: LaneError | None = None,
+    ) -> None:
         self.result = result
+        self.close_error = close_error
         self.opened: list[str] = []
         self.closed: list[str] = []
         self.evals: list[bytes] = []
@@ -147,12 +174,14 @@ class FakeJscTransport:
     async def open(self, handle) -> None:
         self.opened.append(handle.handle_id)
 
-    async def eval(self, handle, data: bytes) -> FeedResult | str:
+    async def eval(self, handle, data: bytes) -> FeedResult | FeedStatus | str:
         self.evals.append(data)
         return self.result
 
     async def close(self, handle) -> None:
         self.closed.append(handle.handle_id)
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
@@ -249,7 +278,7 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.opened, [handle.handle_id])
 
         result = await lane.feed(handle, b"print(1)")
-        self.assertIs(result, FeedResult.ACCEPTED)
+        self.assertIs(result.status, FeedStatus.ACCEPTED)
         self.assertEqual(transport.evals, [b"print(1)"])
 
         collected = await lane.collect_crashes(handle)
@@ -317,6 +346,72 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
         await lane.provision(self.make_profile())
         self.assertIs(await lane.thermal(), Thermal.SERIOUS)
         self.assertTrue(lane.paused)
+
+    async def test_attach_tool_exceptions_park_repair_ios_attach_tools(self) -> None:
+        scenarios = [
+            (FakeAttachClient(check_error=LaneError(LaneErrorCode.DEVICE_LOST, "pair failed")), "trust/dev-mode check"),
+            (FakeAttachClient(mount_error=LaneError(LaneErrorCode.NOT_PROVISIONED, "mounter missing")), "DDI mount"),
+            (FakeAttachClient(probe_error=LaneError(LaneErrorCode.DEVICE_LOST, "probe failed")), "capability probe"),
+        ]
+        for client, step in scenarios:
+            with self.subTest(step=step):
+                lane, cards, _ = self.make_lane(client)
+                profile = self.make_profile()
+                result = await lane.provision(profile)
+                self.assertIs(result.state, ProvisionState.NEEDS_HAND)
+                self.assertEqual(profile.state, "needs_hand")
+                self.assertEqual(cards[0].action, "repair_ios_attach_tools")
+                self.assertEqual(cards[0].metadata["step"], step)
+
+    async def test_feed_after_transport_removed_requires_transport(self) -> None:
+        client = FakeAttachClient()
+        lane, _, transport = self.make_lane(client)
+        await lane.provision(self.make_profile())
+        handle = await lane.launch("javascriptcore", HarnessRef(name="jsc"))
+        lane._jsc_transport = None
+        with self.assertRaises(LaneError) as cm:
+            await lane.feed(handle, b"x")
+        self.assertIs(cm.exception.code, LaneErrorCode.NOT_PROVISIONED)
+        self.assertEqual(transport.evals, [])
+
+    async def test_teardown_closes_handles_and_suppresses_errors(self) -> None:
+        client = FakeAttachClient(
+            release_error=LaneError(LaneErrorCode.DEVICE_LOST, "release failed")
+        )
+        transport = FakeJscTransport(close_error=LaneError(LaneErrorCode.DEVICE_LOST, "close failed"))
+        cards: list[HumanCard] = []
+        lane = IOSTierCLane(attach_client=client, jsc_transport=transport, card_sink=cards.append)
+        await lane.provision(self.make_profile())
+        handle = await lane.launch("javascriptcore", HarnessRef(name="jsc"))
+        await lane.teardown()
+        self.assertEqual(transport.closed, [handle.handle_id])
+        self.assertEqual(client.release_reasons, ["teardown"])
+
+    async def test_thermal_before_provision_is_nominal(self) -> None:
+        lane, _, _ = self.make_lane(FakeAttachClient())
+        self.assertIs(await lane.thermal(), Thermal.NOMINAL)
+
+    async def test_signing_renewal_failure_result_parks_device(self) -> None:
+        now_ms = int(time.time() * 1000)
+        client = FakeAttachClient(signing_expires_ms=now_ms + 1000, renew_ok=False)
+        lane, cards, transport = self.make_lane(client)
+        profile = self.make_profile()
+        await lane.provision(profile)
+        with self.assertRaises(LaneError) as cm:
+            await lane.launch("javascriptcore", HarnessRef(name="jsc"))
+        self.assertIs(cm.exception.code, LaneErrorCode.SIGNING_EXPIRED)
+        self.assertEqual(profile.state, "needs_hand")
+        self.assertEqual(cards[-1].action, "renew_ios_signing")
+        self.assertEqual(transport.opened, [])
+
+    async def test_signing_renewal_without_expiry_uses_fallback(self) -> None:
+        now_ms = int(time.time() * 1000)
+        client = FakeAttachClient(signing_expires_ms=now_ms + 1000, renew_no_expiry=True)
+        lane, _, transport = self.make_lane(client)
+        await lane.provision(self.make_profile())
+        handle = await lane.launch("javascriptcore", HarnessRef(name="jsc"))
+        self.assertEqual(client.renew_calls, 1)
+        self.assertEqual(transport.opened, [handle.handle_id])
 
 
 if __name__ == "__main__":

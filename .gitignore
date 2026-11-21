@@ -3,4 +3,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.venv/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
 .DS_Store

@@ -10,6 +10,7 @@ from ra.lanes.base import (
     CrashRef,
     DeviceProfile,
     FeedResult,
+    FeedStatus,
     Handle,
     HarnessRef,
     LaneError,
@@ -35,7 +36,7 @@ class FakeLane(BaseLane):
     def __init__(
         self,
         *,
-        feed_result: FeedResult = FeedResult.ACCEPTED,
+        feed_result: FeedResult | FeedStatus | str = FeedStatus.ACCEPTED,
         feed_delay_s: float = 0.0,
         thermal_reading: Thermal | str = Thermal.NOMINAL,
         **kwargs,
@@ -55,6 +56,8 @@ class FakeLane(BaseLane):
         p.state = "ready"
         self._ready = True
         return ProvisionResult(
+            ok=True,
+            detail="ready",
             profile=p,
             state=ProvisionState.READY,
             tier=Tier.B,
@@ -64,7 +67,7 @@ class FakeLane(BaseLane):
     async def _launch(self, handle: Handle, target: str, harness: HarnessRef) -> None:
         handle.metadata["launched"] = True
 
-    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | str:
+    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | FeedStatus | str:
         if self.feed_delay_s:
             await asyncio.sleep(self.feed_delay_s)
         return self.feed_result
@@ -93,9 +96,11 @@ class BaseLaneTest(unittest.IsolatedAsyncioTestCase):
         self.handle = await self.lane.launch("target", HarnessRef(name="harness", argv=["run"]))
 
     async def test_feed_result_values(self) -> None:
-        for value in FeedResult:
+        for value in FeedStatus:
             self.lane.feed_result = value
-            self.assertIs(await self.lane.feed(self.handle, b"x"), value)
+            result = await self.lane.feed(self.handle, b"x")
+            self.assertIs(result.status, value)
+            self.assertEqual(result.handle_id, self.handle.id)
 
     async def test_feed_timeout_raises_hang_with_crash_ref(self) -> None:
         lane = FakeLane(feed_timeout_s=0.05, feed_delay_s=0.2)
@@ -151,7 +156,7 @@ class BaseLaneTest(unittest.IsolatedAsyncioTestCase):
         self.lane.thermal_reading = Thermal.NOMINAL
         self.assertIs(await self.lane.thermal(), Thermal.NOMINAL)
         self.assertFalse(self.lane.paused)
-        self.assertIs(await self.lane.feed(self.handle, b"x"), FeedResult.ACCEPTED)
+        self.assertIs((await self.lane.feed(self.handle, b"x")).status, FeedStatus.ACCEPTED)
 
     async def test_critical_thermal_drains_and_releases_udid_once(self) -> None:
         lease = FakeLease()

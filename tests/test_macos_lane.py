@@ -7,7 +7,7 @@ import unittest
 from ra.lanes.base import (
     CrashRef,
     DeviceProfile,
-    FeedResult,
+    FeedStatus,
     HarnessRef,
     HumanCard,
     LaneError,
@@ -61,6 +61,10 @@ class FakeTartController:
         crash_rc: int = 0,
         pmset_stdout: str | None = None,
         thermal: Thermal = Thermal.NOMINAL,
+        xcodes_installed: str = "17.0",
+        xcodes_select_rc: int = 0,
+        sccache_rc: int = 0,
+        xcodebuild_rc: int = 0,
     ) -> None:
         self.running = running
         self.feed_rc = feed_rc
@@ -71,6 +75,10 @@ class FakeTartController:
         self.crash_rc = crash_rc
         self.pmset_stdout = pmset_stdout
         self.thermal = thermal
+        self.xcodes_installed = xcodes_installed
+        self.xcodes_select_rc = xcodes_select_rc
+        self.sccache_rc = sccache_rc
+        self.xcodebuild_rc = xcodebuild_rc
         self.started: list[str] = []
         self.stopped: list[str] = []
         self.closed = False
@@ -91,13 +99,13 @@ class FakeTartController:
                 return cmd(argv, rc=1, err=f"missing:{self.missing}\n")
             return cmd(argv)
         if "xcodes installed" in text:
-            return cmd(argv, out="17.0\n")
+            return cmd(argv, out=self.xcodes_installed)
         if "xcodes select" in text:
-            return cmd(argv)
+            return cmd(argv, rc=self.xcodes_select_rc, err="select failed" if self.xcodes_select_rc else "")
         if "sccache --show-stats" in text:
-            return cmd(argv, out="Compile requests 1\n")
+            return cmd(argv, rc=self.sccache_rc, out="Compile requests 1\n", err="sccache failed" if self.sccache_rc else "")
         if "xcodebuild -version" in text:
-            return cmd(argv, out="Xcode 16.0\n")
+            return cmd(argv, rc=self.xcodebuild_rc, out="Xcode 16.0\n", err="xcodebuild failed" if self.xcodebuild_rc else "")
         if "build-webkit" in text:
             return cmd(argv, rc=self.build_rc, out="build ok\n" if self.build_rc == 0 else "", err=self.build_stderr)
         if "DiagnosticReports" in text or ".ips" in text:
@@ -198,11 +206,11 @@ class MacOSVMLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tools/Scripts/build-webkit --jsc-only --release", exec_text)
         self.assertEqual(cards, [])
 
-        self.assertIs(await lane.feed(handle, b"bytes"), FeedResult.ACCEPTED)
+        self.assertIs((await lane.feed(handle, b"bytes")).status, FeedStatus.ACCEPTED)
         controller.feed_rc = 75
-        self.assertIs(await lane.feed(handle, b"bytes"), FeedResult.SATURATED)
+        self.assertIs((await lane.feed(handle, b"bytes")).status, FeedStatus.SATURATED)
         controller.feed_rc = 1
-        self.assertIs(await lane.feed(handle, b"bytes"), FeedResult.REJECTED)
+        self.assertIs((await lane.feed(handle, b"bytes")).status, FeedStatus.REJECTED)
 
     async def test_collect_crashes_then_reset(self) -> None:
         runner = FakeRunner()
@@ -280,6 +288,147 @@ class MacOSVMLaneTest(unittest.IsolatedAsyncioTestCase):
         await lane.provision(self.make_profile())
         self.assertIs(await lane.thermal(), Thermal.CRITICAL)
         self.assertTrue(lane.drained)
+
+    async def test_ring_gate_blocks_macos_provision(self) -> None:
+        class DenyRing:
+            def allows(self, ring_node: str, build: str | None) -> bool:
+                return False
+
+        runner = FakeRunner()
+        controller = FakeTartController()
+        lane, _ = self.make_lane(runner, controller, ring=DenyRing(), sccache=False)
+        with self.assertRaises(LaneError) as cm:
+            await lane.provision(self.make_profile())
+        self.assertIs(cm.exception.code, LaneErrorCode.OUT_OF_RING)
+        self.assertEqual(runner.calls, [])
+
+    async def test_tart_health_failures_park_needs_hand(self) -> None:
+        for kwargs, action in [
+            ({"version_rc": 1}, "repair_tart"),
+            ({"list_rc": 1}, "repair_tart"),
+            ({"list_stdout": "other-vm\n"}, "create_tart_vm"),
+        ]:
+            with self.subTest(kwargs=kwargs):
+                runner = FakeRunner(**kwargs)
+                controller = FakeTartController()
+                lane, cards = self.make_lane(runner, controller, sccache=False)
+                result = await lane.provision(self.make_profile())
+                self.assertFalse(result.ready)
+                self.assertEqual(result.state, ProvisionState.NEEDS_HAND)
+                self.assertEqual(cards[0].action, action)
+
+    async def test_vm_listed_accepts_json_and_text(self) -> None:
+        for stdout in ['[{"Name": "redapple-macos"}]\n', "redapple-macos\n"]:
+            with self.subTest(stdout=stdout):
+                runner = FakeRunner(list_stdout=stdout)
+                controller = FakeTartController()
+                lane, _ = self.make_lane(runner, controller, sccache=False)
+                result = await lane.provision(self.make_profile())
+                self.assertTrue(result.ready)
+
+    async def test_pinned_xcode_missing_parks_needs_hand(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController(xcodes_installed="16.0\n")
+        lane, cards = self.make_lane(
+            runner, controller, sccache=False, pinned_xcode_version="17.1"
+        )
+        await lane.provision(self.make_profile())
+        with self.assertRaises(LaneError) as cm:
+            await lane.launch(
+                "target", HarnessRef(name="h", argv=["tool"], metadata={"build_webkit": False})
+            )
+        self.assertIs(cm.exception.code, LaneErrorCode.NOT_PROVISIONED)
+        self.assertEqual(cards[-1].action, "install_pinned_xcode")
+
+    async def test_guest_tool_failures_park_needs_hand(self) -> None:
+        scenarios = [
+            ({"xcodes_select_rc": 1}, "select_pinned_xcode"),
+            ({"sccache_rc": 1}, "repair_sccache"),
+            ({"xcodebuild_rc": 1}, "repair_xcode"),
+        ]
+        for controller_kwargs, action in scenarios:
+            with self.subTest(action=action):
+                runner = FakeRunner()
+                controller = FakeTartController(**controller_kwargs)
+                lane, cards = self.make_lane(runner, controller, sccache=True, pinned_xcode_version="17.0")
+                await lane.provision(self.make_profile())
+                with self.assertRaises(LaneError) as cm:
+                    await lane.launch(
+                        "target",
+                        HarnessRef(name="h", argv=["tool"], metadata={"build_webkit": False}),
+                    )
+                self.assertIs(cm.exception.code, LaneErrorCode.NOT_PROVISIONED)
+                self.assertEqual(cards[-1].action, action)
+
+    async def test_build_webkit_requires_dir_and_propagates_failure(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController()
+        lane, _ = self.make_lane(runner, controller, sccache=False)
+        await lane.provision(self.make_profile())
+        with self.assertRaises(LaneError) as cm:
+            await lane.launch("target", HarnessRef(name="h", argv=["tool"], metadata={"build_webkit": True}))
+        self.assertIs(cm.exception.code, LaneErrorCode.HARNESS_REJECTED)
+
+        runner = FakeRunner()
+        controller = FakeTartController(build_rc=1, build_stderr="webkit failed")
+        lane, _ = self.make_lane(runner, controller, sccache=False, webkit_dir="/tmp/webkit")
+        await lane.provision(self.make_profile())
+        with self.assertRaises(LaneError) as cm:
+            await lane.launch("target", HarnessRef(name="h", argv=["tool"], metadata={"build_webkit": True}))
+        self.assertIs(cm.exception.code, LaneErrorCode.HARNESS_REJECTED)
+        self.assertIn("webkit failed", cm.exception.details["output_tail"])
+
+    async def test_feed_harness_rejected_and_device_lost(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController()
+        lane, _ = self.make_lane(runner, controller, sccache=False)
+        await lane.provision(self.make_profile())
+        handle = await lane.launch(
+            "target", HarnessRef(name="h", argv=[], metadata={"build_webkit": False})
+        )
+        with self.assertRaises(LaneError) as cm:
+            await lane.feed(handle, b"x")
+        self.assertIs(cm.exception.code, LaneErrorCode.HARNESS_REJECTED)
+
+        controller.running = False
+        with self.assertRaises(LaneError) as cm:
+            await lane.feed(handle, b"x")
+        self.assertIs(cm.exception.code, LaneErrorCode.DEVICE_LOST)
+
+    async def test_saturated_custom_codes_and_guest_env(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController(feed_rc=76)
+        lane, _ = self.make_lane(runner, controller, sccache=False)
+        await lane.provision(self.make_profile())
+        handle = await lane.launch(
+            "target",
+            HarnessRef(
+                name="h",
+                argv=[],
+                env={"RED": "apple"},
+                metadata={
+                    "build_webkit": False,
+                    "feed_argv": "feed-tool --mode fast",
+                    "saturated_return_codes": [75, 76],
+                },
+            ),
+        )
+        result = await lane.feed(handle, b"x")
+        self.assertIs(result.status, FeedStatus.SATURATED)
+        exec_argv = controller.exec_calls[-1][1]
+        self.assertEqual(exec_argv[:2], ("zsh", "-lc"))
+        self.assertIn("export RED=apple", exec_argv[2])
+        self.assertIn("feed-tool --mode fast", exec_argv[2])
+
+    async def test_teardown_stops_vm_and_marks_not_ready(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController()
+        lane, _ = self.make_lane(runner, controller, sccache=False)
+        await lane.provision(self.make_profile())
+        await lane.teardown()
+        self.assertEqual(controller.stopped, ["redapple-macos"])
+        self.assertTrue(controller.closed)
+        self.assertFalse(lane.ready)
 
 
 if __name__ == "__main__":

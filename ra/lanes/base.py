@@ -11,9 +11,10 @@ import asyncio
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 FEED_TIMEOUT_S = 30.0
 
@@ -30,7 +31,9 @@ class Tier(StrEnum):
     C = "C"
 
 
-class FeedResult(StrEnum):
+class FeedStatus(StrEnum):
+    """Appendix C feed status."""
+
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
     SATURATED = "SATURATED"
@@ -84,21 +87,23 @@ def _now_ms() -> int:
 class CrashRef:
     """Reference to crash evidence collected by a lane.
 
-    ``context`` defaults to ``app`` per RA-LAN-010: findings remain app-context
-    until a Tier A run proves daemon reach.
+    ``path``/``payload`` are the Appendix C crash fields; the remaining fields
+    carry RA-LAN metadata. ``context`` defaults to ``app`` per RA-LAN-010:
+    findings remain app-context until a Tier A run proves daemon reach.
     """
 
     id: str
-    kind: str
-    handle_id: str | None = None
     path: str | None = None
+    payload: bytes = b""
+    kind: str = "crash"
+    handle_id: str | None = None
     digest: str | None = None
     context: str = "app"
     created_ms: int = field(default_factory=_now_ms)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def hang(cls, handle_id: str) -> "CrashRef":
+    def hang(cls, handle_id: str) -> CrashRef:
         """Synthetic crash reference for a feed that exceeded 30 seconds."""
         return cls(
             id=f"crash_hang_{handle_id}_{_now_ms()}",
@@ -123,14 +128,14 @@ class HarnessRef:
 class DeviceProfile:
     """Device/VM profile used for lane selection and provisioning.
 
-    Appendix B requires ``udid``, ``tier``, ``ring_node`` and ``state``. The
+    Appendix B/C require ``udid``, ``tier``, ``ring_node`` and ``state``; the
     remaining fields mirror the ``device_profile`` DDL in Appendix A.
     """
 
     udid: str
+    tier: Tier
     ring_node: str
     state: str
-    tier: Tier
     build: str | None = None
     thermal: Thermal = Thermal.NOMINAL
     crashes: int = 0
@@ -155,12 +160,15 @@ class HumanCard:
 class ProvisionResult:
     """Result of ``Lane.provision``.
 
-    Provisioning gaps are not lane failures: they return ``needs_hand`` with a
-    single ``HumanCard`` and leave the run free to dispatch elsewhere.
+    ``ok``/``detail`` are the Appendix C provisioning fields. Provisioning gaps
+    are not lane failures: they return ``ok=False`` with ``state=needs_hand``
+    and a single ``HumanCard`` so the run can dispatch elsewhere.
     """
 
-    profile: DeviceProfile
-    state: ProvisionState
+    ok: bool = False
+    detail: str = ""
+    profile: DeviceProfile | None = None
+    state: ProvisionState | None = None
     tier: Tier | None = None
     human_card: HumanCard | None = None
     capabilities: frozenset[str] = frozenset()
@@ -169,7 +177,7 @@ class ProvisionResult:
 
     @property
     def ready(self) -> bool:
-        return self.state is ProvisionState.READY
+        return self.ok or self.state is ProvisionState.READY
 
 
 class LaneError(Exception):
@@ -204,12 +212,6 @@ class RingGate(Protocol):
     def allows(self, ring_node: str, build: str | None) -> bool: ...
 
 
-class CardSink(Protocol):
-    """Sink for one-action human cards emitted by provisioning gaps."""
-
-    def __call__(self, card: HumanCard) -> None: ...
-
-
 class UdidLease(Protocol):
     """Optional per-UDID exclusivity lease released on critical thermal."""
 
@@ -217,18 +219,37 @@ class UdidLease(Protocol):
 
 
 @dataclass
-class Handle:
-    """Opaque lane handle returned by ``launch``."""
+class FeedResult:
+    """Appendix C feed result."""
 
-    handle_id: str
-    lane: str
+    status: FeedStatus
+    detail: str = ""
+    handle_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Handle:
+    """Opaque lane handle returned by ``launch``.
+
+    ``id``/``udid``/``target`` are the Appendix C handle fields;
+    ``handle_id`` remains as a compatibility alias for the lane-internal id.
+    """
+
+    id: str
+    udid: str
     target: str
-    harness: HarnessRef
+    lane: str = ""
+    harness: HarnessRef = field(default_factory=lambda: HarnessRef(name=""))
     created_ms: int = field(default_factory=_now_ms)
     state: str = "launched"
     metadata: dict[str, Any] = field(default_factory=dict)
     crashes_collected: bool = False
     reset: bool = False
+
+    @property
+    def handle_id(self) -> str:
+        return self.id
 
 
 class Lane(Protocol):
@@ -269,7 +290,7 @@ class BaseLane(ABC):
         self,
         *,
         feed_timeout_s: float = FEED_TIMEOUT_S,
-        card_sink: CardSink | None = None,
+        card_sink: Callable[[HumanCard], None] | None = None,
         ring: RingGate | None = None,
         id_prefix: str | None = None,
     ) -> None:
@@ -347,7 +368,7 @@ class BaseLane(ABC):
         try:
             await self._launch(handle, target, harness)
         except Exception:
-            self._handles.pop(handle.handle_id, None)
+            self._handles.pop(handle.id, None)
             raise
         return handle
 
@@ -368,7 +389,7 @@ class BaseLane(ABC):
                 crash_ref=crash,
                 details={"handle_id": h.handle_id, "target": h.target},
             ) from None
-        return self._coerce_feed_result(result)
+        return self._coerce_feed_result(result, handle=h)
 
     async def collect_crashes(self, h: Handle) -> list[CrashRef]:
         """Collect crash references; valid only before ``reset`` (RA-LAN-007)."""
@@ -416,20 +437,22 @@ class BaseLane(ABC):
         self._drained = False
 
     def _register_handle(self, target: str, harness: HarnessRef) -> Handle:
+        udid = self._profile.udid if self._profile is not None else ""
         handle = Handle(
-            handle_id=f"{self._id_prefix}-{uuid.uuid4().hex[:12]}",
-            lane=self.name,
+            id=f"{self._id_prefix}-{uuid.uuid4().hex[:12]}",
+            udid=udid,
             target=target,
+            lane=self.name,
             harness=harness,
-            metadata={"target": target},
+            metadata={"target": target, "udid": udid},
         )
-        self._handles[handle.handle_id] = handle
+        self._handles[handle.id] = handle
         return handle
 
     def _check_handle(self, h: Handle, *, allow_reset: bool = False) -> None:
         if not isinstance(h, Handle):
             raise LaneError(LaneErrorCode.FORMAT_FAIL, "expected a lane Handle")
-        if h.lane != self.name or h.handle_id not in self._handles:
+        if h.lane != self.name or h.id not in self._handles:
             raise LaneError(
                 LaneErrorCode.FORMAT_FAIL,
                 "handle does not belong to this lane",
@@ -458,16 +481,19 @@ class BaseLane(ABC):
                 details={"thermal": Thermal.SERIOUS.value, "pause": True},
             )
 
-    def _coerce_feed_result(self, result: FeedResult | str) -> FeedResult:
+    def _coerce_feed_result(
+        self, result: FeedResult | FeedStatus | str, *, handle: Handle
+    ) -> FeedResult:
         if isinstance(result, FeedResult):
             return result
         try:
-            return FeedResult(result)
+            status = result if isinstance(result, FeedStatus) else FeedStatus(result)
         except ValueError as exc:
             raise LaneError(
                 LaneErrorCode.FORMAT_FAIL,
                 f"invalid feed result: {result!r}",
             ) from exc
+        return FeedResult(status=status, handle_id=handle.handle_id)
 
     def _apply_thermal(self, reading: Thermal) -> None:
         if reading is Thermal.CRITICAL:
@@ -489,7 +515,7 @@ class BaseLane(ABC):
         """Platform-specific launch work after common checks."""
 
     @abstractmethod
-    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | str:
+    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | FeedStatus | str:
         """Platform-specific feed implementation."""
 
     @abstractmethod

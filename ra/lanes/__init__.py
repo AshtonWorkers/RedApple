@@ -1,17 +1,18 @@
 """RED APPLE lane adapters."""
 
 from .base import (
+    NON_RETRYABLE_LANE_ERRORS,
     BaseLane,
     CrashRef,
     DeviceProfile,
     FeedResult,
+    FeedStatus,
     Handle,
     HarnessRef,
     HumanCard,
     Lane,
     LaneError,
     LaneErrorCode,
-    NON_RETRYABLE_LANE_ERRORS,
     ProvisionResult,
     ProvisionState,
     RingGate,
@@ -20,17 +21,18 @@ from .base import (
 )
 
 __all__ = [
+    "NON_RETRYABLE_LANE_ERRORS",
     "BaseLane",
     "CrashRef",
     "DeviceProfile",
     "FeedResult",
+    "FeedStatus",
     "Handle",
     "HarnessRef",
     "HumanCard",
     "Lane",
     "LaneError",
     "LaneErrorCode",
-    "NON_RETRYABLE_LANE_ERRORS",
     "ProvisionResult",
     "ProvisionState",
     "RingGate",

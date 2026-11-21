@@ -6,13 +6,14 @@ import json
 import shlex
 import shutil
 import uuid
-from typing import Any, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from ra.lanes.base import (
     BaseLane,
     CrashRef,
     DeviceProfile,
-    FeedResult,
+    FeedStatus,
     Handle,
     HarnessRef,
     HumanCard,
@@ -148,6 +149,8 @@ class MacOSVMLane(BaseLane):
         p.thermal = Thermal.NOMINAL
         self._ready = True
         return ProvisionResult(
+            ok=True,
+            detail="ready",
             profile=p,
             state=ProvisionState.READY,
             tier=Tier.A,
@@ -168,7 +171,7 @@ class MacOSVMLane(BaseLane):
             await self._build_webkit(vm, harness)
         handle.metadata.update({"vm": vm, "guest_ready": True})
 
-    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | str:
+    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedStatus:
         vm = str(handle.metadata.get("vm") or self._vm_name_for(self._profile))
         if not await self._controller.is_running(vm):
             raise LaneError(LaneErrorCode.DEVICE_LOST, f"tart VM {vm} is not running")
@@ -181,11 +184,11 @@ class MacOSVMLane(BaseLane):
         guest_argv = self._guest_command(argv, handle.harness.env)
         res = await self._controller.exec(vm, guest_argv, input_bytes=data)
         if res.returncode == 0:
-            return FeedResult.ACCEPTED
+            return FeedStatus.ACCEPTED
         saturated = self._saturated_codes(handle.harness)
         if res.returncode in saturated:
-            return FeedResult.SATURATED
-        return FeedResult.REJECTED
+            return FeedStatus.SATURATED
+        return FeedStatus.REJECTED
 
     async def _collect_crashes(self, handle: Handle) -> list[CrashRef]:
         vm = str(handle.metadata.get("vm") or self._vm_name_for(self._profile))
@@ -317,6 +320,8 @@ class MacOSVMLane(BaseLane):
         profile.state = "needs_hand"
         self._ready = False
         return ProvisionResult(
+            ok=False,
+            detail=title,
             profile=profile,
             state=ProvisionState.NEEDS_HAND,
             human_card=card,

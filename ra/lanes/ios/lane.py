@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from ra.lanes.base import (
     BaseLane,
     CrashRef,
     DeviceProfile,
     FeedResult,
+    FeedStatus,
     Handle,
     HarnessRef,
     HumanCard,
@@ -205,6 +208,8 @@ class IOSTierCLane(BaseLane):
         p.thermal = Thermal.NOMINAL
         self._ready = True
         return ProvisionResult(
+            ok=True,
+            detail="ready",
             profile=p,
             state=ProvisionState.READY,
             tier=Tier.C,
@@ -232,15 +237,14 @@ class IOSTierCLane(BaseLane):
         await self._jsc_transport.open(handle)
         self._opened_handles[handle.handle_id] = handle
 
-    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | str:
+    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult | FeedStatus | str:
         transport = self._jsc_transport
         if transport is None:
             raise LaneError(
                 LaneErrorCode.NOT_PROVISIONED,
                 "iOS Tier C feed requires a configured JscTransport",
             )
-        result = await transport.eval(handle, data)
-        return self._coerce_feed_result(result)
+        return await transport.eval(handle, data)
 
     async def _collect_crashes(self, handle: Handle) -> list[CrashRef]:
         info = self._require_info()
@@ -258,17 +262,13 @@ class IOSTierCLane(BaseLane):
     async def _teardown(self) -> None:
         for handle in list(self._opened_handles.values()):
             if self._jsc_transport is not None:
-                try:
+                with contextlib.suppress(LaneError):
                     await self._jsc_transport.close(handle)
-                except LaneError:
-                    pass
         self._opened_handles.clear()
         info = self._info
         if info is not None:
-            try:
+            with contextlib.suppress(LaneError):
                 await self._attach_client.release_udid(info, "teardown")
-            except LaneError:
-                pass
 
     async def _read_thermal(self) -> Thermal | str:
         info = self._info
@@ -390,6 +390,8 @@ class IOSTierCLane(BaseLane):
         profile.state = "needs_hand"
         self._ready = False
         return ProvisionResult(
+            ok=False,
+            detail=title,
             profile=profile,
             state=ProvisionState.NEEDS_HAND,
             human_card=card,

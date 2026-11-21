@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from ra.lanes.base import LaneError, LaneErrorCode
 from ra.lanes.commands import CommandResult, CommandRunner

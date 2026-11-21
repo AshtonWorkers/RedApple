@@ -6,8 +6,9 @@ import asyncio
 import os
 import signal
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 
 
 @dataclass(frozen=True)
