@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from ra.lanes.base import (
@@ -113,7 +114,7 @@ class IOSTierCLane(BaseLane):
             if exc.code in (LaneErrorCode.DEVICE_LOST, LaneErrorCode.NOT_PROVISIONED):
                 return self._ios_tool_gap(p, exc, step="trust/dev-mode check")
             raise
-        if info.trusted is False or info.developer_mode is False:
+        if info.trusted is not True or info.developer_mode is not True:
             return self._provision_gap(
                 p,
                 action="trust_enable_developer_mode",
@@ -248,7 +249,11 @@ class IOSTierCLane(BaseLane):
 
     async def _collect_crashes(self, handle: Handle) -> list[CrashRef]:
         info = self._require_info()
-        return await self._attach_client.collect_crashes(info)
+        refs = await self._attach_client.collect_crashes(info)
+        return [
+            replace(ref, handle_id=handle.handle_id if ref.handle_id is None else ref.handle_id)
+            for ref in refs
+        ]
 
     async def _reset(self, handle: Handle) -> None:
         transport = self._jsc_transport
@@ -316,8 +321,6 @@ class IOSTierCLane(BaseLane):
         )
 
     def _with_info(self, info: Any, **changes: Any) -> Any:
-        from dataclasses import replace
-
         return replace(info, **changes)
 
     def _park_signing_failure(self, info: Any, message: str) -> None:

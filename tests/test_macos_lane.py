@@ -159,6 +159,19 @@ class MacOSVMLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("tart", "--version"), runner.calls)
         self.assertTrue(any(call[:2] == ("tart", "list") for call in runner.calls))
 
+    async def test_provision_updates_profile_tier_to_lane_tier(self) -> None:
+        runner = FakeRunner()
+        controller = FakeTartController()
+        lane, _ = self.make_lane(runner, controller)
+        profile = self.make_profile()
+        profile.tier = Tier.C
+
+        result = await lane.provision(profile)
+
+        self.assertIs(result.tier, Tier.A)
+        self.assertIs(profile.tier, Tier.A)
+        self.assertIs(result.profile, profile)
+
     async def test_missing_tart_parks_needs_hand_with_one_card(self) -> None:
         runner = FakeRunner()
         controller = FakeTartController()
@@ -419,6 +432,25 @@ class MacOSVMLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exec_argv[:2], ("zsh", "-lc"))
         self.assertIn("export RED=apple", exec_argv[2])
         self.assertIn("feed-tool --mode fast", exec_argv[2])
+
+    async def test_saturated_return_codes_parse_strings(self) -> None:
+        scenarios = [("75", 75), ("75, 76", 76), ("75 76", 75)]
+        for codes, feed_rc in scenarios:
+            with self.subTest(codes=codes, feed_rc=feed_rc):
+                runner = FakeRunner()
+                controller = FakeTartController(feed_rc=feed_rc)
+                lane, _ = self.make_lane(runner, controller, sccache=False)
+                await lane.provision(self.make_profile())
+                handle = await lane.launch(
+                    "target",
+                    HarnessRef(
+                        name="h",
+                        argv=["feed-tool"],
+                        metadata={"build_webkit": False, "saturated_return_codes": codes},
+                    ),
+                )
+                result = await lane.feed(handle, b"x")
+                self.assertIs(result.status, FeedStatus.SATURATED)
 
     async def test_teardown_stops_vm_and_marks_not_ready(self) -> None:
         runner = FakeRunner()

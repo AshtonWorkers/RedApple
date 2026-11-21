@@ -244,6 +244,25 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cards[0].action, action)
                 self.assertEqual(cards[0].device_udid, profile.udid)
 
+    async def test_unknown_trust_or_dev_mode_is_not_ready(self) -> None:
+        scenarios = [
+            {"trusted": None},
+            {"developer_mode": None},
+            {"trusted": None, "developer_mode": None},
+        ]
+        for kwargs in scenarios:
+            with self.subTest(kwargs=kwargs):
+                client = FakeAttachClient(**kwargs)
+                lane, cards, _ = self.make_lane(client)
+                profile = self.make_profile()
+                result = await lane.provision(profile)
+
+                self.assertIs(result.state, ProvisionState.NEEDS_HAND)
+                self.assertEqual(profile.state, "needs_hand")
+                self.assertEqual(len(cards), 1)
+                self.assertEqual(cards[0].action, "trust_enable_developer_mode")
+                self.assertEqual(client.calls, ["identify", "check_trust_dev_mode"])
+
     async def test_sign_install_exception_parks_needs_hand(self) -> None:
         client = FakeAttachClient(
             sign_install_error=LaneError(LaneErrorCode.NOT_PROVISIONED, "missing sign tool")
@@ -282,8 +301,12 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.evals, [b"print(1)"])
 
         collected = await lane.collect_crashes(handle)
-        self.assertEqual(collected, crashes)
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(collected[0].id, "crash_ios_1")
+        self.assertEqual(collected[0].kind, "ios_crash")
+        self.assertEqual(collected[0].path, "/private/var/mobile/x.ips")
         self.assertEqual(collected[0].context, "app")
+        self.assertEqual(collected[0].handle_id, handle.handle_id)
 
         await lane.reset(handle)
         self.assertEqual(transport.closed, [handle.handle_id])

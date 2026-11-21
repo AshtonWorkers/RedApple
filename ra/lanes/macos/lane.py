@@ -145,6 +145,7 @@ class MacOSVMLane(BaseLane):
                 details={"vm": vm},
             )
 
+        p.tier = Tier.A
         p.state = "ready"
         p.thermal = Thermal.NOMINAL
         self._ready = True
@@ -501,6 +502,8 @@ class MacOSVMLane(BaseLane):
         raw = harness.metadata.get("saturated_return_codes", (75,))
         if isinstance(raw, int):
             return {raw}
+        if isinstance(raw, str):
+            return {int(part) for part in raw.replace(",", " ").split()}
         return {int(code) for code in raw}
 
     @staticmethod
