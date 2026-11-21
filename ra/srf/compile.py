@@ -22,7 +22,12 @@ from .models import (
     sort_entry_points,
     xpc_format_spec,
 )
-from .sbpl import SandboxProfile, profile_grants_service, profiles_from_strings
+from .sbpl import (
+    SandboxProfile,
+    profile_denies_service,
+    profile_grants_service,
+    profiles_from_strings,
+)
 from .store import EntryPointStore
 from .xpc import extract_xpc_shape, image_has_xpc_markers
 
@@ -100,7 +105,7 @@ class _Candidate:
     reach: Set[ReachRecord] = field(default_factory=set)
     fields: Dict[str, str] = field(default_factory=dict)
     image_paths: Set[str] = field(default_factory=set)
-    granting_profiles: Set[str] = field(default_factory=set)
+    granting_profiles: Set[SandboxProfile] = field(default_factory=set)
 
     def add_reach(self, record: ReachRecord) -> None:
         self.reach.add(record)
@@ -114,7 +119,7 @@ class _Candidate:
         self.image_paths.add(path)
 
     def grant(self, profile: SandboxProfile) -> None:
-        self.granting_profiles.add(profile.name)
+        self.granting_profiles.add(profile)
         self.add_reach(
             ReachRecord(source=f"sandbox-profile:{profile.name}", hops=1, via=profile.source)
         )
@@ -177,13 +182,11 @@ def _with_delta(ep: EntryPoint, delta: int) -> EntryPoint:
     )
 
 
-def _privilege_delta(cand: _Candidate, profiles_by_name: Dict[str, SandboxProfile]) -> int:
+def _privilege_delta(cand: _Candidate) -> int:
     score = 0
-    granting = [
-        profiles_by_name[n]
-        for n in sorted(cand.granting_profiles)
-        if n in profiles_by_name
-    ]
+    granting = sorted(
+        cand.granting_profiles, key=lambda p: (p.name, p.source, p.sha256)
+    )
     if granting:
         score += 1
     if any(p.privilege_score > 0 for p in granting):
@@ -216,7 +219,7 @@ async def compile_surface(
     strings_scanned = 0
     xpc_shapes = 0
 
-    images = list(cache.images)
+    images = sorted(cache.images, key=lambda im: (im.path, im.address))
     if image_limit is not None:
         images = images[: max(0, image_limit)]
 
@@ -246,10 +249,6 @@ async def compile_surface(
             if shape is not None:
                 cand.add_fields(shape.fields)
 
-    profiles_by_name: Dict[str, SandboxProfile] = {}
-    for profile in profiles:
-        profiles_by_name.setdefault(profile.name, profile)
-
     profiles_sorted = sorted(profiles, key=lambda p: (p.name, p.source, p.sha256))
     for profile in profiles_sorted:
         for literal in profile.mach_lookup_allow:
@@ -260,7 +259,8 @@ async def compile_surface(
 
     for profile in profiles_sorted:
         for cand in candidates.values():
-            if cand.name in profile.mach_lookup_deny and cand.name not in profile.mach_lookup_allow:
+            explicitly_allowed = cand.name in profile.mach_lookup_allow
+            if not explicitly_allowed and profile_denies_service(profile, cand.name):
                 continue
             if profile_grants_service(profile, cand.name):
                 cand.grant(profile)
@@ -272,7 +272,7 @@ async def compile_surface(
         if not cand.granting_profiles and not _looks_like_mach_service(cand.name):
             continue
         ep = _candidate_to_entry_point(cand, ring_node)
-        ep = _with_delta(ep, _privilege_delta(cand, profiles_by_name))
+        ep = _with_delta(ep, _privilege_delta(cand))
         rows.append(ep.to_row())
     rows = sort_entry_points(rows)
     digest = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")

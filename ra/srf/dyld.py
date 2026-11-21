@@ -29,6 +29,7 @@ STRING_SECTION_NAMES = frozenset({"__cstring", "__oslogstring", "__ustring"})
 PROFILE_SCAN_SECTION_NAMES = frozenset({"__const", "__cstring", "__oslogstring", "__ustring"})
 MAX_SECTION_BYTES = 96 * 1024 * 1024
 MAX_STRING_BYTES = 1024 * 1024
+MAX_LOAD_COMMAND_BYTES = 16 * 1024 * 1024
 
 
 class CacheError(RuntimeError):
@@ -129,13 +130,6 @@ def _u32(buf: bytes, off: int) -> int:
 
 def _u64(buf: bytes, off: int) -> int:
     return int(struct.unpack_from("<Q", buf, off)[0])
-
-
-def _cstr(buf: bytes, off: int, limit: int = 4096) -> str:
-    end = buf.find(b"\0", off, off + limit)
-    if end < 0:
-        end = min(len(buf), off + limit)
-    return buf[off:end].decode("utf-8", "replace")
 
 
 @dataclass(frozen=True)
@@ -279,6 +273,9 @@ class DyldCache:
             for cand in candidates:
                 cf = _CacheFile(cand)
                 await cf.open()
+                if cf.size < HEADER_SIZE:
+                    await cf.close()
+                    continue
                 head = await cf.read_at(0, HEADER_SIZE)
                 if not head.startswith(MAGIC):
                     await cf.close()
@@ -305,7 +302,14 @@ class DyldCache:
         return await _read_va(self.files, self.mappings, va, size)
 
     async def read_cstr_va(self, va: int, limit: int = 4096) -> str:
-        data = await self.read_va(va, limit)
+        size = limit
+        for mapping in self.mappings:
+            if mapping.va_start <= va < mapping.va_end:
+                size = min(limit, mapping.va_end - va)
+                break
+        else:
+            raise CacheError(f"VA {va:#x} is not mapped")
+        data = await self.read_va(va, size)
         end = data.find(b"\0")
         if end >= 0:
             data = data[:end]
@@ -404,15 +408,16 @@ async def _load_images(
             address, _mod_time, _inode, path_off, _pad = struct.unpack("<QQQII", rec)
             if address == 0:
                 continue
-            path_bytes = await cf.read_at(path_off, 4096)
+            path_size = min(4096, max(0, cf.size - path_off))
+            path_bytes = await cf.read_at(path_off, path_size) if path_size else b""
             end = path_bytes.find(b"\0")
             if end >= 0:
                 path_bytes = path_bytes[:end]
             path = path_bytes.decode("utf-8", "replace")
             hdr = await _read_va(files, mappings, address, 32)
-            if len(hdr) < 32:
-                continue
             sizeofcmds = _u32(hdr, 20)
+            if sizeofcmds > MAX_LOAD_COMMAND_BYTES:
+                raise CacheError(f"Mach-O load commands too large at {address:#x}")
             cmds = await _read_va(files, mappings, address, 32 + sizeofcmds)
             image = parse_macho(cmds, address)
             images.append(

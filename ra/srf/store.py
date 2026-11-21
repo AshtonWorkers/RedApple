@@ -7,10 +7,11 @@ foundation owns the real ledger, and this shim lets RA-SRF land in parallel.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Protocol, Sequence, Union
+from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence, Union
 
 DDL = """
 CREATE TABLE IF NOT EXISTS entry_point (
@@ -59,7 +60,7 @@ class SQLiteEntryPointStore:
         payload = [dict(r) for r in rows]
 
         def _replace() -> None:
-            with self._connect() as conn:
+            with contextlib.closing(self._connect()) as conn:
                 conn.execute("DELETE FROM entry_point WHERE ring_node = ?", (ring_node,))
                 conn.executemany(
                     """
@@ -87,7 +88,7 @@ class SQLiteEntryPointStore:
 
     async def read_ring_node(self, ring_node: str) -> List[Dict[str, Any]]:
         def _read() -> List[Dict[str, Any]]:
-            with self._connect() as conn:
+            with contextlib.closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     SELECT id, name, reach_from_json, privilege_delta,
@@ -106,3 +107,16 @@ class SQLiteEntryPointStore:
 
 def rows_to_json(rows: Iterable[Dict[str, Any]]) -> str:
     return json.dumps(list(rows), sort_keys=True, separators=(",", ":"))
+
+
+def ledger_entry_point_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Map an RA-SRF row to PR #8 ledger `insert_entry_point` payload shape."""
+    return {
+        "entry_point_id": row["id"],
+        "name": row["name"],
+        "reach_from_json": row["reach_from_json"],
+        "privilege_delta": row["privilege_delta"],
+        "parser_complexity": row["parser_complexity"],
+        "weight": row["weight"],
+        "ring_node": row["ring_node"],
+    }

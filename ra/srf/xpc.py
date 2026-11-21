@@ -120,8 +120,6 @@ def probable_xpc_keys(strings: Iterable[str]) -> tuple[XPCField, ...]:
     for s in strings:
         if not KEY_RE.match(s):
             continue
-        if not s[0].isalpha():
-            continue
         score = _score_key(s)
         if score < 4:
             continue

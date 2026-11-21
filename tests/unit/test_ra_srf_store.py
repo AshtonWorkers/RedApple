@@ -3,7 +3,13 @@
 import asyncio
 import sqlite3
 
-from ra.srf.store import DDL, SQLiteEntryPointStore
+from ra.srf.store import (
+    DDL,
+    InMemoryEntryPointStore,
+    SQLiteEntryPointStore,
+    ledger_entry_point_payload,
+    rows_to_json,
+)
 
 
 def _row(id_: str, name: str, weight: float) -> dict:
@@ -44,3 +50,41 @@ def test_RA_SRF_004_ring_node_isolation_and_order(tmp_path):
     ring2 = asyncio.run(store.read_ring_node("ring2"))
     assert [r["name"] for r in ring1] == ["com.apple.a"]
     assert [r["name"] for r in ring2] == ["com.apple.b"]
+
+
+def test_RA_SRF_004_in_memory_store_copies_rows_and_missing_ring_is_empty():
+    store = InMemoryEntryPointStore()
+    row = _row("ep_a", "com.apple.a", 1.0)
+    asyncio.run(store.replace_ring_node("ring", [row]))
+    row["name"] = "mutated"
+    got = asyncio.run(store.read_ring_node("ring"))
+    assert got == [_row("ep_a", "com.apple.a", 1.0)]
+    assert asyncio.run(store.read_ring_node("missing")) == []
+
+
+def test_RA_SRF_004_sqlite_creates_parent_and_reads_empty_ring(tmp_path):
+    store = SQLiteEntryPointStore(tmp_path / "nested" / "dir" / "ep.sqlite")
+    assert asyncio.run(store.read_ring_node("missing")) == []
+    asyncio.run(store.replace_ring_node("ring", []))
+    assert asyncio.run(store.read_ring_node("ring")) == []
+
+
+def test_RA_SRF_004_rows_to_json_and_ledger_payload_mapping():
+    row = _row("ep_a", "com.apple.a", 1.5)
+    assert rows_to_json([row]) == (
+        '[{"id":"ep_a","name":"com.apple.a",'
+        '"parser_complexity":0.5,"privilege_delta":1,'
+        '"reach_from_json":"[{\\"source\\":\\"image:/x\\",\\"hops\\":2,\\"via\\":\\"dyld-cache\\"}]",'
+        '"ring_node":"ring","weight":1.5}]'
+    )
+    payload = ledger_entry_point_payload(row)
+    assert payload == {
+        "entry_point_id": "ep_a",
+        "name": "com.apple.a",
+        "reach_from_json": row["reach_from_json"],
+        "privilege_delta": 1,
+        "parser_complexity": 0.5,
+        "weight": 1.5,
+        "ring_node": "ring",
+    }
+    assert "id" not in payload

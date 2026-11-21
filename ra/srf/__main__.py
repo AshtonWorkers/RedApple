@@ -58,6 +58,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--top", type=int, default=20)
     args = parser.parse_args(argv)
+    if args.top < 0:
+        parser.error("--top must be >= 0")
+    if args.limit is not None and args.limit < 0:
+        parser.error("--limit must be >= 0")
     summary = asyncio.run(_run(args))
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

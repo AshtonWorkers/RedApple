@@ -150,14 +150,6 @@ def _walk(forms: list[object]) -> Iterable[list[object]]:
             stack.extend(node)
 
 
-def _strings(node: object) -> Iterable[str]:
-    if isinstance(node, str):
-        yield node
-    elif isinstance(node, list):
-        for item in node:
-            yield from _strings(item)
-
-
 def _is_allow_deny(form: list[object]) -> bool:
     return len(form) >= 2 and form[0] in {"allow", "deny"}
 
@@ -180,7 +172,10 @@ def parse_sbpl_profile(
     """Parse one SBPL profile document. Returns None when it is not SBPL."""
     if not looks_like_sbpl(text):
         return None
-    forms = _parse(_tokenize(text))
+    try:
+        forms = _parse(_tokenize(text))
+    except ValueError:
+        return None
     operations: set[str] = set()
     allow_lookup: set[str] = set()
     deny_lookup: set[str] = set()
@@ -220,7 +215,9 @@ def parse_sbpl_profile(
                 if n.startswith("regex:") or SERVICE_NAME_RE.match(n)
             )
         ),
-        mach_lookup_deny=tuple(sorted(n for n in deny_lookup if SERVICE_NAME_RE.match(n))),
+        mach_lookup_deny=tuple(
+            sorted(n for n in deny_lookup if n.startswith("regex:") or SERVICE_NAME_RE.match(n))
+        ),
         xpc_message_ops=tuple(sorted(xpc_ops)),
         high_risk_ops=tuple(sorted(high_risk)),
         sha256=sha,
@@ -268,6 +265,20 @@ def profile_grants_service(profile: SandboxProfile, service: str) -> bool:
     for allowed in profile.mach_lookup_allow:
         if allowed.startswith("regex:"):
             pattern = allowed[len("regex:") :]
+            try:
+                if re.search(pattern, service):
+                    return True
+            except re.error:
+                continue
+    return False
+
+
+def profile_denies_service(profile: SandboxProfile, service: str) -> bool:
+    if service in profile.mach_lookup_deny:
+        return True
+    for denied in profile.mach_lookup_deny:
+        if denied.startswith("regex:"):
+            pattern = denied[len("regex:") :]
             try:
                 if re.search(pattern, service):
                     return True
