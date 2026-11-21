@@ -1,1 +1,5 @@
-"""iOS lane adapters (M2+; M0 ships the interface only)."""
+"""iOS lane adapters."""
+
+from .lane import IOSTierCLane
+
+__all__ = ["IOSTierCLane"]

@@ -1,1 +1,6 @@
-"""macOS lane adapters (M1+; M0 ships the interface only)."""
+"""macOS VM lane adapter."""
+
+from .lane import MacOSVMLane
+from .tart import TartVMController
+
+__all__ = ["MacOSVMLane", "TartVMController"]
