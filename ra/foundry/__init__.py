@@ -1,10 +1,24 @@
 """Foundry public API."""
 
-from .acceptance import covered_functions, evaluate_acceptance, parser_malloc_reachable
+from .acceptance import (
+    coverage_edge_counts,
+    covered_functions,
+    evaluate_acceptance,
+    parser_malloc_reachable,
+)
 from .cas import ContentAddressedStore, pack_harness_files, unpack_harness_files
 from .dialect import load_dialect_file, validate_dialect
 from .errors import CasCorrupt, DialectDefect, FoundryError, HarnessRejected
-from .foundry import Foundry, PARK_AFTER_ATTEMPTS, ROLLBACK_BUDGET_MS
+from .foundry import PARK_AFTER_ATTEMPTS, ROLLBACK_BUDGET_MS, Foundry, FoundryOutcome
+from .models import (
+    AcceptanceDecision,
+    AcceptanceMeasurements,
+    AttemptRecord,
+    Dialect,
+    FoundryState,
+    HarnessSpec,
+    now_ms,
+)
 from .runner import (
     CompileResult,
     DryRunResult,
@@ -12,22 +26,17 @@ from .runner import (
     harness_spec_from_manifest,
     load_manifest,
     measure_harness,
-    parse_average_exec_per_sec,
     resolve_clangxx,
     run_dry_run,
-)
-from .models import (
-    AcceptanceDecision,
-    AcceptanceMeasurements,
-    AttemptRecord,
-    Dialect,
-    FoundryOutcome,
-    FoundryState,
-    HarnessSpec,
-    RollbackResult,
-    now_ms,
+    run_seed_coverage,
 )
 from .store import FoundryStore, JsonFoundryStore
+from .synthesis import (
+    HarnessSynthesizer,
+    SynthesisRequest,
+    SynthesizedHarness,
+    TemplateHarnessSynthesizer,
+)
 
 __all__ = [
     "AcceptanceDecision",
@@ -46,11 +55,15 @@ __all__ = [
     "FoundryStore",
     "HarnessRejected",
     "HarnessSpec",
+    "HarnessSynthesizer",
     "JsonFoundryStore",
     "PARK_AFTER_ATTEMPTS",
     "ROLLBACK_BUDGET_MS",
-    "RollbackResult",
+    "SynthesisRequest",
+    "SynthesizedHarness",
+    "TemplateHarnessSynthesizer",
     "compile_harness",
+    "coverage_edge_counts",
     "covered_functions",
     "evaluate_acceptance",
     "harness_spec_from_manifest",
@@ -59,10 +72,10 @@ __all__ = [
     "measure_harness",
     "now_ms",
     "pack_harness_files",
-    "parse_average_exec_per_sec",
     "parser_malloc_reachable",
     "resolve_clangxx",
     "run_dry_run",
+    "run_seed_coverage",
     "unpack_harness_files",
     "validate_dialect",
 ]

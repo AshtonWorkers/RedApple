@@ -1,45 +1,63 @@
-"""Mechanical RA-FND-001 acceptance gate.
-
-Pure logic only: no I/O, no imports from other ra/ modules.
-"""
+"""Pure RA-FND-001 acceptance gate."""
 
 from __future__ import annotations
 
 import re
-from typing import Iterator, List
 
 from .models import AcceptanceDecision, AcceptanceMeasurements
 
-_COVERED_FUNC_RE = re.compile(
-    r"^COVERED_FUNC:\s+hits:\s+\d+\s+edges:\s+\S+\s+(?P<func>.*)$"
+_FUNC_EDGE_RE = re.compile(
+    r"^(?P<uncovered>UN)?COVERED_FUNC:\s+hits:\s+\d+\s+edges:\s+"
+    r"(?P<covered>\d+)/(?P<total>\d+)\s+(?P<rest>.*)$",
+    re.MULTILINE,
 )
+_LOCATION_RE = re.compile(r"^(?P<name>.*)\s+\S+:\d+\s*$")
 
 
-def covered_functions(coverage_map: str) -> Iterator[str]:
-    """Yield function entries from a libFuzzer ``-print_coverage=1`` map."""
-    for line in coverage_map.splitlines():
-        match = _COVERED_FUNC_RE.match(line.strip())
-        if match is not None:
-            yield match.group("func")
+def _function_name(rest: str) -> str:
+    match = _LOCATION_RE.match(rest.strip())
+    if match is None:
+        return rest.strip()
+    return match.group("name").strip()
 
 
-def parser_malloc_reachable(
-    coverage_map: str, symbol: str = "parser_malloc"
-) -> bool:
-    """Return True when a covered parser allocation symbol is in the map."""
-    return any(symbol in func for func in covered_functions(coverage_map))
+def covered_functions(coverage_map: str) -> set[str]:
+    """Return function names present in covered libFuzzer output."""
+    names: set[str] = set()
+    for match in _FUNC_EDGE_RE.finditer(coverage_map):
+        if match.group("uncovered"):
+            continue
+        name = _function_name(match.group("rest"))
+        if name:
+            names.add(name)
+    return names
+
+
+def parser_malloc_reachable(coverage_map: str, symbol: str) -> bool:
+    """Return whether ``symbol`` appears in covered functions."""
+    for name in covered_functions(coverage_map):
+        if name == symbol or name.startswith(f"{symbol}(") or name.startswith(f"{symbol}::"):
+            return True
+    return False
+
+
+def coverage_edge_counts(coverage_map: str) -> tuple[int, int]:
+    """Return ``(covered_edges, total_edges)`` from libFuzzer coverage output."""
+    covered = 0
+    total = 0
+    for match in _FUNC_EDGE_RE.finditer(coverage_map):
+        covered_edges = int(match.group("covered"))
+        total_edges = int(match.group("total"))
+        if not match.group("uncovered"):
+            covered += covered_edges
+        total += total_edges
+    return covered, total
 
 
 def evaluate_acceptance(measurements: AcceptanceMeasurements) -> AcceptanceDecision:
-    """Evaluate the three mechanical RA-FND-001 checks.
-
-    Invariants touched: I5 (checks are a fixed ordered mapping), I8 (the gate is
-    evaluated before any side effect by the caller).
-    """
+    """Evaluate the mechanical RA-FND-001 checks."""
     checks = {
-        "compiles": (
-            bool(measurements.compiled) and bool(measurements.dry_run_completed)
-        ),
+        "compiles": bool(measurements.compiled) and bool(measurements.dry_run_completed),
         "edges_sec_ge_60pct_surface_median": (
             measurements.surface_median_edges_per_sec > 0
             and measurements.edges_per_sec
@@ -48,26 +66,9 @@ def evaluate_acceptance(measurements: AcceptanceMeasurements) -> AcceptanceDecis
         "parser_malloc_in_coverage": parser_malloc_reachable(
             measurements.coverage_map, measurements.parser_malloc_symbol
         ),
+        "throughput_metric_is_coverage_edges_per_sec": (
+            measurements.throughput_metric == "coverage_edges_per_sec"
+        ),
     }
-
-    reasons: List[str] = []
-    if not checks["compiles"]:
-        reasons.append("compiles: harness did not compile or dry run did not complete")
-    if not checks["edges_sec_ge_60pct_surface_median"]:
-        reasons.append(
-            "edges_sec_ge_60pct_surface_median "
-            f"[{measurements.throughput_metric}]: "
-            f"{measurements.edges_per_sec} < "
-            f"{0.6 * measurements.surface_median_edges_per_sec} "
-            f"(median {measurements.surface_median_edges_per_sec}; "
-            f"{measurements.throughput_caveat})"
-        )
-    if not checks["parser_malloc_in_coverage"]:
-        reasons.append(
-            "parser_malloc_in_coverage: "
-            f"{measurements.parser_malloc_symbol} not covered"
-        )
-
-    return AcceptanceDecision(
-        accepted=all(checks.values()), checks=checks, reasons=reasons
-    )
+    reasons = [name for name, ok in checks.items() if not ok]
+    return AcceptanceDecision(accepted=not reasons, checks=checks, reasons=tuple(reasons))

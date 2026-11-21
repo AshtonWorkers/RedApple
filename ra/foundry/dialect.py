@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, NoReturn
 
 from .errors import DialectDefect
 from .models import Dialect
@@ -57,20 +57,17 @@ def _type_matches(value: Any, expected: str) -> bool:
     return True
 
 
-def _fail(path: str, message: str) -> None:
+def _fail(path: str, message: str) -> NoReturn:
     raise DialectDefect(f"{path}: {message}")
 
 
-def _validate(instance: Any, schema: Dict[str, Any], path: str = "$") -> None:
+def _validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
     if "enum" in schema and instance not in schema["enum"]:
         _fail(path, f"value {instance!r} not in enum {schema['enum']!r}")
 
     expected_type = schema.get("type")
     if expected_type is not None and not _type_matches(instance, expected_type):
-        _fail(
-            path,
-            f"expected type {expected_type}, got {_type_name(instance)}",
-        )
+        _fail(path, f"expected type {expected_type}, got {_type_name(instance)}")
 
     if expected_type == "object" or (isinstance(instance, dict) and "properties" in schema):
         if not isinstance(instance, dict):
@@ -120,14 +117,17 @@ def _validate(instance: Any, schema: Dict[str, Any], path: str = "$") -> None:
             _fail(path, f"number {instance} above maximum {maximum}")
 
 
-def load_schema(schema_path: Optional[Path] = None) -> Dict[str, Any]:
+def load_schema(schema_path: Path | None = None) -> dict[str, Any]:
     """Load the groom dialect JSON schema."""
     path = schema_path or DEFAULT_SCHEMA_PATH
-    return json.loads(path.read_text(encoding="utf-8"))
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(schema, dict):
+        raise DialectDefect(f"schema must be a JSON object: {path}")
+    return schema
 
 
 def validate_dialect(
-    data: Dict[str, Any], schema_path: Optional[Path] = None
+    data: dict[str, Any], schema_path: Path | None = None
 ) -> Dialect:
     """Validate dialect data against the schema and §11 validator rule."""
     schema = load_schema(schema_path)
@@ -136,10 +136,7 @@ def validate_dialect(
     validator = str(data["validator"])
     requirement = SECTION_11_VALIDATORS.get(validator)
     if requirement is None:
-        _fail(
-            "$.validator",
-            f"validator {validator!r} does not name a §11 assertion",
-        )
+        _fail("$.validator", f"validator {validator!r} does not name a §11 assertion")
 
     return Dialect(
         format=str(data["format"]),
@@ -150,7 +147,7 @@ def validate_dialect(
 
 
 def load_dialect_file(
-    path: Path, schema_path: Optional[Path] = None
+    path: Path, schema_path: Path | None = None
 ) -> Dialect:
     """Read and validate a dialect JSON file."""
     data = json.loads(path.read_text(encoding="utf-8"))

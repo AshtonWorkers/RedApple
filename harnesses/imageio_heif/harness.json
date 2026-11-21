@@ -20,7 +20,8 @@
   "seed_corpus": "corpus",
   "dry_run_seconds": 600,
   "surface_median_edges_per_sec": 1000.0,
-  "throughput_metric": "exec_per_sec_proxy",
-  "throughput_caveat": "TODO(RA-FND-001): exec/sec is a proxy for coverage edges/sec; replace with new-coverage edges/sec from libFuzzer cov growth.",
+  "throughput_metric": "coverage_edges_per_sec",
+  "throughput_caveat": "edges_per_sec is new libFuzzer coverage edges over dry-run wall time after a -runs=0 seed baseline.",
+  "baseline_coverage": true,
   "parser_malloc_symbol": "parser_malloc"
 }

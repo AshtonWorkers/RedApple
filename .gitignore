@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 *_fuzzer
 *.dSYM/
+.venv/
+.coverage
+coverage.xml

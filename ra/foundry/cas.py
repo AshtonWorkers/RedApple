@@ -10,10 +10,12 @@ import hashlib
 import io
 import tarfile
 import uuid
-from pathlib import Path
-from typing import Dict, Mapping
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from .errors import CasCorrupt
+from .models import dumps_json
 
 
 def sha256_hex(data: bytes) -> str:
@@ -40,9 +42,9 @@ def pack_harness_files(files: Mapping[str, bytes]) -> bytes:
 
 
 def _safe_member_name(name: str) -> bool:
-    if name.startswith("/") or name.startswith("\\"):
+    if not name or name.startswith(("/", "\\")) or "\\" in name:
         return False
-    parts = Path(name).parts
+    parts = PurePosixPath(name).parts
     return ".." not in parts and "" not in parts
 
 
@@ -62,8 +64,8 @@ def unpack_harness_files(bundle: bytes, target: Path) -> None:
             destination = (root / member.name).resolve()
             try:
                 destination.relative_to(root)
-            except ValueError:
-                raise CasCorrupt(f"unsafe path in harness bundle: {member.name}")
+            except ValueError as exc:
+                raise CasCorrupt(f"unsafe path in harness bundle: {member.name}") from exc
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(extracted.read())
 
@@ -104,6 +106,12 @@ class ContentAddressedStore:
     async def get(self, sha256: str) -> bytes:
         """Read bytes by content address, verifying integrity."""
         return await asyncio.to_thread(self._get_sync, sha256)
+
+    async def put_json(self, payload: dict[str, Any], *, kind: str | None = None) -> str:
+        """Store a JSON payload and return its content address."""
+        if kind is not None and "kind" not in payload:
+            payload = {"kind": kind, **payload}
+        return await self.put(dumps_json(payload))
 
     async def put_harness(self, files: Mapping[str, bytes]) -> str:
         """Store a harness bundle and return its content address."""

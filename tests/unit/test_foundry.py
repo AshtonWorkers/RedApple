@@ -1,4 +1,4 @@
-"""RA-FND Foundry acceptance tests."""
+"""RA-FND Foundry orchestration tests."""
 
 from __future__ import annotations
 
@@ -6,47 +6,72 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ra.foundry import (
     AcceptanceMeasurements,
-    CasCorrupt,
     ContentAddressedStore,
     DialectDefect,
     Foundry,
+    FoundryError,
+    FoundryState,
     HarnessSpec,
     JsonFoundryStore,
-    evaluate_acceptance,
-    load_dialect_file,
-    pack_harness_files,
-    unpack_harness_files,
+    SynthesisRequest,
+    SynthesizedHarness,
+    TemplateHarnessSynthesizer,
 )
 
-GOOD_COVERAGE = (
-    "COVERAGE:\n"
-    "COVERED_FUNC: hits: 10 edges: 2/2 parser_malloc(unsigned long) harness.cc:10\n"
-)
-BAD_COVERAGE = "COVERAGE:\nCOVERED_FUNC: hits: 10 edges: 2/2 LLVMFuzzerTestOneInput harness.cc:20\n"
-
-VALID_DIALECT = {
-    "format": "heif",
-    "pre_seed": [{"box": "meta", "pad_to_class": "kalloc_1024"}, {"box": "iprp", "count": 8}],
-    "victim_pad": "align_to_class",
-    "victim_class": "kalloc_2048",
-    "post": {"free": "ipco_before_victim"},
-    "validator": "heap_diff.class_stable",
-}
+from .helpers import BAD_COVERAGE, VALID_DIALECT, measurements, write_harness
 
 
-def measurements(**overrides) -> AcceptanceMeasurements:
-    values = {
-        "compiled": True,
-        "edges_per_sec": 1000.0,
-        "surface_median_edges_per_sec": 1000.0,
-        "coverage_map": GOOD_COVERAGE,
-        "dry_run_seconds": 600.0,
-    }
-    values.update(overrides)
-    return AcceptanceMeasurements(**values)
+class FakeMeasurer:
+    def __init__(self, results: list[AcceptanceMeasurements]) -> None:
+        self.results = list(results)
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(
+        self,
+        spec: HarnessSpec,
+        manifest: dict[str, object],
+        workdir: Path,
+        corpus_dir: Path,
+        surface_median_edges_per_sec: float | None = None,
+        *,
+        clangxx: str | None = None,
+        dry_run_seconds: float | None = None,
+        run_baseline: bool = True,
+    ) -> AcceptanceMeasurements:
+        self.calls.append(
+            {
+                "spec": spec,
+                "manifest": manifest,
+                "workdir": workdir,
+                "corpus_dir": corpus_dir,
+                "surface_median_edges_per_sec": surface_median_edges_per_sec,
+                "clangxx": clangxx,
+                "dry_run_seconds": dry_run_seconds,
+                "run_baseline": run_baseline,
+            }
+        )
+        if not self.results:
+            raise AssertionError("FakeMeasurer ran out of results")
+        return self.results.pop(0)
+
+
+class RecordingSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SynthesisRequest] = []
+        self._inner = TemplateHarnessSynthesizer()
+
+    def synthesize(self, request: SynthesisRequest) -> SynthesizedHarness:
+        self.requests.append(request)
+        return self._inner.synthesize(request)
+
+
+class UnsafeSynthesizer:
+    def synthesize(self, request: SynthesisRequest) -> SynthesizedHarness:
+        return SynthesizedHarness(files={"../evil": b"x"}, manifest={})
 
 
 class FoundryTest(unittest.IsolatedAsyncioTestCase):
@@ -55,134 +80,223 @@ class FoundryTest(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self._tmp.name)
         self.store = JsonFoundryStore(self.root / "store")
         self.cas = ContentAddressedStore(self.root / "cas")
-        self.foundry = Foundry(self.store, self.cas)
+        self.foundry = Foundry(self.store, self.cas, workroot=self.root / "work")
 
     async def asyncTearDown(self) -> None:
         self._tmp.cleanup()
 
-    def make_harness(self, dialect=None) -> HarnessSpec:
-        directory = self.root / "harness"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "harness.cc").write_text("int LLVMFuzzerTestOneInput() { return 0; }\n")
-        (directory / "heif.dialect.json").write_text(
-            json.dumps(VALID_DIALECT if dialect is None else dialect)
-        )
-        return HarnessSpec(
-            id="test_heif",
-            format="heif",
-            directory=directory,
-            source="harness.cc",
-            dialect="heif.dialect.json",
-            manifest=None,
-        )
+    async def test_submit_measurements_accepts_and_stores_artifacts(self) -> None:
+        spec = write_harness(self.root)
+        outcome = await self.foundry.submit_measurements(spec, measurements())
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(outcome.to_dict()["state"], "accepted")
+        self.assertFalse(outcome.parked)
+        self.assertEqual(outcome.state.state, "accepted")
+        self.assertIsNotNone(outcome.bundle_artifact_id)
+        self.assertEqual(outcome.state.last_good_artifact_id, outcome.bundle_artifact_id)
+        self.assertIsNone(outcome.reprompt)
 
-    async def test_RA_FND_001(self) -> None:
-        accepted = evaluate_acceptance(measurements())
-        self.assertTrue(accepted.accepted)
-        self.assertEqual(
-            accepted.checks,
-            {
-                "compiles": True,
-                "edges_sec_ge_60pct_surface_median": True,
-                "parser_malloc_in_coverage": True,
-            },
-        )
+        stored = await self.store.load(spec.id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.state, "accepted")
+        self.assertEqual(len(stored.attempts), 1)
+        self.assertEqual(stored.attempts[0].measurement_artifact_id, outcome.measurement_artifact_id)
 
-        for bad in (
-            measurements(compiled=False),
-            measurements(dry_run_completed=False),
-            measurements(edges_per_sec=599.0),
-            measurements(coverage_map=BAD_COVERAGE),
-        ):
-            decision = evaluate_acceptance(bad)
-            self.assertFalse(decision.accepted)
-            self.assertTrue(decision.reasons)
+        payload = json.loads((await self.cas.get(outcome.measurement_artifact_id)).decode())
+        self.assertTrue(payload["decision"]["accepted"])
+        self.assertEqual(payload["measurements"]["throughput_metric"], "coverage_edges_per_sec")
+        target = self.root / "bundle"
+        await self.cas.extract_harness(outcome.bundle_artifact_id, target)  # type: ignore[arg-type]
+        self.assertTrue((target / "harness.cc").exists())
+        self.assertTrue((target / "heif.dialect.json").exists())
+        states = await self.foundry.list_states()
+        self.assertEqual(len(states), 1)
 
-    async def test_RA_FND_002(self) -> None:
-        spec = self.make_harness()
-        dialect = await self.foundry.load_dialect(spec)
-        self.assertEqual(dialect.validator, "heap_diff.class_stable")
-        self.assertEqual(dialect.validator_requirement, "RA-GRM-002")
+    async def test_reprompt_then_park_after_three_failures(self) -> None:
+        spec = write_harness(self.root)
+        bad = measurements(coverage_map=BAD_COVERAGE)
+        first = await self.foundry.submit_measurements(spec, bad)
+        self.assertFalse(first.accepted)
+        self.assertEqual(first.state.state, "reprompt")
+        self.assertFalse(first.parked)
+        self.assertIsNotNone(first.reprompt)
+        assert first.reprompt is not None
+        self.assertEqual(first.reprompt["task_type"], "harness_synth")
+        self.assertEqual(first.reprompt["harness_id"], spec.id)
+        self.assertIn("parser_malloc_in_coverage", first.reprompt["decision"]["reasons"])
+        self.assertEqual(first.reprompt["failing_measurement"]["coverage_map"], BAD_COVERAGE)
 
+        second = await self.foundry.submit_measurements(spec, bad)
+        self.assertEqual(second.state.state, "reprompt")
+        self.assertEqual(second.state.reprompt_count, 2)
+
+        third = await self.foundry.submit_measurements(spec, bad)
+        self.assertTrue(third.parked)
+        self.assertIsNone(third.reprompt)
+        self.assertEqual(third.state.state, "parked")
+        self.assertEqual(third.state.foundry_defect_count, 3)
+        self.assertEqual(third.state.reprompt_count, 2)
+        self.assertEqual(len(third.state.attempts), 3)
+        self.assertTrue(all(not attempt.decision.accepted for attempt in third.state.attempts))
+
+        with self.assertRaises(FoundryError):
+            await self.foundry.submit_measurements(spec, measurements())
+
+    async def test_dialect_defect_blocks_before_side_effects(self) -> None:
         bad = dict(VALID_DIALECT)
         bad["validator"] = "heap_diff.not_a_section_11_assertion"
-        bad_spec = self.make_harness(dialect=bad)
+        spec = write_harness(self.root, dialect=bad)
         with self.assertRaises(DialectDefect):
-            await self.foundry.submit(bad_spec, measurements())
+            await self.foundry.submit_measurements(spec, measurements())
+        self.assertEqual(await self.store.list_ids(), [])
+        with self.assertRaises(DialectDefect):
+            await self.foundry.submit_candidate(spec)
         self.assertEqual(await self.store.list_ids(), [])
 
-        schema_bad = dict(VALID_DIALECT)
-        schema_bad["unexpected"] = True
-        with self.assertRaises(DialectDefect):
-            load_dialect_file(
-                self.make_harness(dialect=schema_bad).dialect_path()
-            )
-
-        too_many = dict(VALID_DIALECT)
-        too_many["pre_seed"] = [{"box": "meta", "count": 65}]
-        with self.assertRaises(DialectDefect):
-            load_dialect_file(self.make_harness(dialect=too_many).dialect_path())
-
-    async def test_RA_FND_003(self) -> None:
-        spec = self.make_harness()
-        outcome = await self.foundry.submit(
-            spec, measurements(coverage_map=BAD_COVERAGE)
-        )
-        self.assertEqual(outcome.status, "reprompt")
-        self.assertEqual(outcome.state.foundry_defect, 1)
-        self.assertIsNotNone(outcome.reprompt)
-        assert outcome.reprompt is not None
-        self.assertEqual(outcome.reprompt["task_type"], "harness_synth")
-        self.assertEqual(
-            outcome.reprompt["failing_artifact_id"], outcome.artifact_ids[0]
-        )
-        self.assertTrue(
-            any(
-                "parser_malloc_in_coverage" in reason
-                for reason in outcome.reprompt["decision"]["reasons"]
-            )
-        )
-
-        stored = await self.cas.get(outcome.artifact_ids[0])
-        payload = json.loads(stored.decode("utf-8"))
-        self.assertFalse(payload["decision"]["accepted"])
-        self.assertEqual(payload["measurements"]["coverage_map"], BAD_COVERAGE)
-
-    async def test_RA_FND_004(self) -> None:
-        spec = self.make_harness()
+    async def test_submit_alias(self) -> None:
+        spec = write_harness(self.root)
         outcome = await self.foundry.submit(spec, measurements())
-        self.assertEqual(outcome.status, "accepted")
-        self.assertIsNotNone(outcome.state.last_good_artifact_id)
+        self.assertTrue(outcome.accepted)
 
-        original = spec.source_path().read_bytes()
-        spec.source_path().write_text("// broken candidate\n")
-        target = self.root / "rollback"
-        result = await self.foundry.rollback(spec.id, target)
-        self.assertLess(result.elapsed_ms, 10_000)
-        self.assertEqual((target / spec.source).read_bytes(), original)
-        self.assertEqual((target / spec.dialect).read_bytes(), spec.dialect_path().read_bytes())
+    async def test_rollback_restores_last_good_bundle(self) -> None:
+        spec = write_harness(self.root)
+        original = spec.source_path.read_bytes()
+        await self.foundry.submit_measurements(spec, measurements())
+        spec.source_path.write_text("// broken candidate\n", encoding="utf-8")
+        target = self.root / "restored"
+        state = await self.foundry.rollback(spec.id, target)
+        self.assertEqual(state.state, "candidate")
+        self.assertEqual((target / "harness.cc").read_bytes(), original)
+        self.assertEqual((target / "heif.dialect.json").read_bytes(), spec.dialect_path.read_bytes())
 
-    async def test_cas_rejects_symlink_escape(self) -> None:
-        outside = self.root / "outside.txt"
-        target = self.root / "extract"
-        target.mkdir()
-        (target / "link").symlink_to(outside)
-        bundle = pack_harness_files({"link": b"payload"})
-        with self.assertRaises(CasCorrupt):
-            unpack_harness_files(bundle, target)
-        self.assertFalse(outside.exists())
+    async def test_rollback_errors(self) -> None:
+        with self.assertRaises(FoundryError):
+            await self.foundry.rollback("missing")
+        await self.store.save(FoundryState(harness_id="no_good", format="heif"))
+        with self.assertRaises(FoundryError):
+            await self.foundry.rollback("no_good")
 
-    async def test_RA_FND_005(self) -> None:
-        spec = self.make_harness()
-        outcomes = [
-            await self.foundry.submit(spec, measurements(coverage_map=BAD_COVERAGE))
-            for _ in range(3)
-        ]
-        self.assertEqual([o.status for o in outcomes], ["reprompt", "reprompt", "parked"])
-        self.assertEqual(outcomes[-1].state.state, "parked")
-        self.assertEqual(outcomes[-1].state.foundry_defect, 3)
-        self.assertEqual(len(outcomes[-1].state.attempts), 3)
-        self.assertTrue(all(not a.accepted for a in outcomes[-1].state.attempts))
+    async def test_rollback_budget_enforced(self) -> None:
+        spec = write_harness(self.root)
+        await self.foundry.submit_measurements(spec, measurements())
+        with (
+            mock.patch("ra.foundry.foundry.now_ms", side_effect=[1000, 11000, 11000]),
+            self.assertRaises(FoundryError),
+        ):
+            await self.foundry.rollback(spec.id)
+
+    async def test_submit_candidate_synthesizes_measures_and_stores_bundle(self) -> None:
+        spec = write_harness(self.root, harness_id="synth")
+        measurer = FakeMeasurer([measurements()])
+        synthesizer = RecordingSynthesizer()
+        foundry = Foundry(
+            self.store,
+            self.cas,
+            synthesizer=synthesizer,
+            measurer=measurer,
+            workroot=self.root / "work",
+        )
+        outcome = await foundry.submit_candidate(
+            spec,
+            surface_median_edges_per_sec=1000.0,
+            dry_run_seconds=1.0,
+            run_baseline=False,
+        )
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(len(measurer.calls), 1)
+        call = measurer.calls[0]
+        candidate = call["spec"]
+        assert isinstance(candidate, HarnessSpec)
+        self.assertEqual(candidate.source, "LLVMFuzzerTestOneInput.cc")
+        self.assertEqual(candidate.dialect, "groom-dialect.json")
+        self.assertEqual(candidate.manifest, "harness.json")
+        self.assertEqual(call["run_baseline"], False)
+        self.assertEqual(call["dry_run_seconds"], 1.0)
+        self.assertTrue(candidate.source_path.exists())
+        self.assertTrue(candidate.dialect_path.exists())
+        assert candidate.manifest_path is not None
+        self.assertTrue(candidate.manifest_path.exists())
+        corpus_dir = call["corpus_dir"]
+        assert isinstance(corpus_dir, Path)
+        self.assertTrue((corpus_dir / "seed_000").exists())
+
+        self.assertEqual(len(synthesizer.requests), 1)
+        request = synthesizer.requests[0]
+        self.assertEqual(request.attempt, 1)
+        self.assertIsNone(request.feedback)
+        self.assertEqual(request.dialect_bytes, spec.dialect_path.read_bytes())
+
+        target = self.root / "synth-bundle"
+        await self.cas.extract_harness(outcome.bundle_artifact_id, target)  # type: ignore[arg-type]
+        self.assertTrue((target / "LLVMFuzzerTestOneInput.cc").exists())
+        self.assertTrue(any(path.name.startswith("seed_") for path in (target / "corpus").iterdir()))
+
+    async def test_submit_candidate_passes_feedback_on_retry(self) -> None:
+        spec = write_harness(self.root, harness_id="retry")
+        measurer = FakeMeasurer([measurements(coverage_map=BAD_COVERAGE), measurements()])
+        synthesizer = RecordingSynthesizer()
+        foundry = Foundry(self.store, self.cas, synthesizer=synthesizer, measurer=measurer)
+        first = await foundry.submit_candidate(spec, surface_median_edges_per_sec=1000.0)
+        self.assertFalse(first.accepted)
+        second = await foundry.submit_candidate(spec, surface_median_edges_per_sec=1000.0)
+        self.assertTrue(second.accepted)
+        self.assertEqual(len(synthesizer.requests), 2)
+        feedback = synthesizer.requests[1].feedback
+        self.assertIsNotNone(feedback)
+        assert feedback is not None
+        self.assertEqual(feedback["attempt"], 1)
+        self.assertIn("parser_malloc_in_coverage", feedback["reasons"])
+        self.assertEqual(synthesizer.requests[1].attempt, 2)
+
+    async def test_submit_candidate_parked_raises_before_work(self) -> None:
+        spec = write_harness(self.root, harness_id="parked")
+        await self.store.save(FoundryState(harness_id=spec.id, format=spec.format, state="parked"))
+        measurer = FakeMeasurer([])
+        synthesizer = RecordingSynthesizer()
+        foundry = Foundry(self.store, self.cas, synthesizer=synthesizer, measurer=measurer)
+        with self.assertRaises(FoundryError):
+            await foundry.submit_candidate(spec)
+        self.assertEqual(measurer.calls, [])
+        self.assertEqual(synthesizer.requests, [])
+
+    async def test_submit_candidate_manifest_validation(self) -> None:
+        for index, manifest in enumerate(
+            [
+                {"compile_args": "-O2"},
+                {"surface_median_edges_per_sec": "high"},
+                {"surface_median_edges_per_sec": True},
+                {"dry_run_seconds": "soon"},
+                {"dry_run_seconds": True},
+            ]
+        ):
+            spec = write_harness(self.root, harness_id=f"badmanifest{index}", manifest=manifest)
+            measurer = FakeMeasurer([])
+            synthesizer = RecordingSynthesizer()
+            foundry = Foundry(self.store, self.cas, synthesizer=synthesizer, measurer=measurer)
+            with self.subTest(manifest=manifest), self.assertRaises(FoundryError):
+                await foundry.submit_candidate(spec)
+            self.assertEqual(synthesizer.requests, [])
+            self.assertEqual(measurer.calls, [])
+
+    async def test_list_states_skips_missing_state(self) -> None:
+        class GhostStore:
+            async def load(self, harness_id: str) -> FoundryState | None:
+                return None
+
+            async def save(self, state: FoundryState) -> None:
+                return None
+
+            async def list_ids(self) -> list[str]:
+                return ["ghost"]
+
+        foundry = Foundry(GhostStore(), self.cas)  # type: ignore[arg-type]
+        self.assertEqual(await foundry.list_states(), [])
+
+    async def test_submit_candidate_rejects_unsafe_synthesized_path(self) -> None:
+        spec = write_harness(self.root, harness_id="unsafe")
+        foundry = Foundry(self.store, self.cas, synthesizer=UnsafeSynthesizer(), measurer=FakeMeasurer([]))
+        with self.assertRaises(FoundryError):
+            await foundry.submit_candidate(spec)
 
 
 if __name__ == "__main__":
