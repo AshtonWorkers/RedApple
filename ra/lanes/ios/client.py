@@ -179,12 +179,13 @@ class LibimobiledeviceIosAttachClient:
     async def collect_crashes(self, info: IosDeviceInfo) -> list[CrashRef]:
         if self._crash_command is None:
             return []
-        try:
-            res = await self._run(self._substitute(self._crash_command, info), timeout_s=120)
-        except LaneError:
-            return []
+        res = await self._run(self._substitute(self._crash_command, info), timeout_s=120)
         if res.returncode != 0 or res.timed_out:
-            return []
+            raise LaneError(
+                LaneErrorCode.DEVICE_LOST,
+                "iOS crash collection failed",
+                details={"udid": info.udid, "stderr": res.stderr[-500:]},
+            )
         refs: list[CrashRef] = []
         for line in res.stdout.splitlines():
             path = line.strip()
@@ -207,9 +208,15 @@ class LibimobiledeviceIosAttachClient:
 
     async def reset_device(self, info: IosDeviceInfo) -> None:
         if self._reset_command is not None:
-            await self._run(self._substitute(self._reset_command, info), timeout_s=120)
-            return
-        await self._run(["idevicediagnostics", "restart", "-u", info.udid], timeout_s=30)
+            res = await self._run(self._substitute(self._reset_command, info), timeout_s=120)
+        else:
+            res = await self._run(["idevicediagnostics", "restart", "-u", info.udid], timeout_s=30)
+        if res.returncode != 0 or res.timed_out:
+            raise LaneError(
+                LaneErrorCode.DEVICE_LOST,
+                "iOS device reset failed",
+                details={"udid": info.udid, "stderr": res.stderr[-500:]},
+            )
 
     async def renew_signing(self, info: IosDeviceInfo) -> IosInstallResult:
         if self._sign_command is None:
