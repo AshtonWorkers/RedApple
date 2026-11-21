@@ -42,6 +42,8 @@ class FakeAttachClient:
         ddi_mounted: bool = True,
         install_ok: bool = True,
         install_error: LaneErrorCode | None = None,
+        sign_install_error: LaneError | None = None,
+        renew_error: LaneError | None = None,
         capabilities=frozenset({"javascriptcore"}),
         signing_expires_ms: int | None = None,
         signing_renewals: int = 0,
@@ -55,6 +57,8 @@ class FakeAttachClient:
         self.ddi_mounted = ddi_mounted
         self.install_ok = install_ok
         self.install_error = install_error
+        self.sign_install_error = sign_install_error
+        self.renew_error = renew_error
         self.capabilities = frozenset(capabilities)
         self.signing_expires_ms = signing_expires_ms
         self.signing_renewals = signing_renewals
@@ -92,6 +96,8 @@ class FakeAttachClient:
 
     async def sign_install(self, info: IosDeviceInfo) -> IosInstallResult:
         self.calls.append("sign_install")
+        if self.sign_install_error is not None:
+            raise self.sign_install_error
         if not self.install_ok:
             return IosInstallResult(
                 ok=False,
@@ -117,6 +123,8 @@ class FakeAttachClient:
     async def renew_signing(self, info: IosDeviceInfo) -> IosInstallResult:
         self.calls.append("renew_signing")
         self.renew_calls += 1
+        if self.renew_error is not None:
+            raise self.renew_error
         if not self.renew_ok:
             return IosInstallResult(ok=False, error_code=LaneErrorCode.SIGNING_EXPIRED, message="renew failed")
         return IosInstallResult(
@@ -207,6 +215,19 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cards[0].action, action)
                 self.assertEqual(cards[0].device_udid, profile.udid)
 
+    async def test_sign_install_exception_parks_needs_hand(self) -> None:
+        client = FakeAttachClient(
+            sign_install_error=LaneError(LaneErrorCode.NOT_PROVISIONED, "missing sign tool")
+        )
+        lane, cards, _ = self.make_lane(client)
+        profile = self.make_profile()
+        result = await lane.provision(profile)
+        self.assertIs(result.state, ProvisionState.NEEDS_HAND)
+        self.assertEqual(profile.state, "needs_hand")
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0].action, "renew_ios_signing")
+        self.assertEqual(cards[0].blocker, LaneErrorCode.NOT_PROVISIONED.value.lower())
+
     async def test_ring_gate_blocks_before_identify(self) -> None:
         client = FakeAttachClient()
         cards: list[HumanCard] = []
@@ -272,6 +293,22 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
             await lane.launch("javascriptcore", HarnessRef(name="jsc"))
         self.assertIs(cm.exception.code, LaneErrorCode.SIGNING_EXPIRED)
         self.assertEqual(client.renew_calls, 0)
+        self.assertEqual(transport.opened, [])
+
+    async def test_renew_signing_exception_parks_device(self) -> None:
+        now_ms = int(time.time() * 1000)
+        client = FakeAttachClient(
+            signing_expires_ms=now_ms + 1000,
+            renew_error=LaneError(LaneErrorCode.NOT_PROVISIONED, "missing renew command"),
+        )
+        lane, cards, transport = self.make_lane(client)
+        profile = self.make_profile()
+        await lane.provision(profile)
+        with self.assertRaises(LaneError) as cm:
+            await lane.launch("javascriptcore", HarnessRef(name="jsc"))
+        self.assertIs(cm.exception.code, LaneErrorCode.NOT_PROVISIONED)
+        self.assertEqual(profile.state, "needs_hand")
+        self.assertEqual(cards[-1].action, "renew_ios_signing")
         self.assertEqual(transport.opened, [])
 
     async def test_thermal_reading_flows_through_lane(self) -> None:

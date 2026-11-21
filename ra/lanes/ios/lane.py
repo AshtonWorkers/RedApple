@@ -146,7 +146,25 @@ class IOSTierCLane(BaseLane):
                 details={"udid": p.udid, "build": info.build},
             )
 
-        install = await self._attach_client.sign_install(info)
+        try:
+            install = await self._attach_client.sign_install(info)
+        except LaneError as exc:
+            if exc.code in (
+                LaneErrorCode.NOT_PROVISIONED,
+                LaneErrorCode.DEVICE_LOST,
+                LaneErrorCode.SIGNING_EXPIRED,
+                LaneErrorCode.INSTALL_FAILED,
+            ):
+                return self._provision_gap(
+                    p,
+                    action="renew_ios_signing",
+                    title="Repair iOS sign/install",
+                    instruction="Repair the configured iOS sign/install command and signing material, then retry.",
+                    blocker=exc.code.value.lower(),
+                    error_code=exc.code,
+                    details={"message": str(exc)},
+                )
+            raise
         if not install.ok:
             code = install.error_code or LaneErrorCode.INSTALL_FAILED
             return self._provision_gap(
@@ -279,7 +297,11 @@ class IOSTierCLane(BaseLane):
                 retryable=False,
                 details={"udid": getattr(info, "udid", None), "renewals": renewals},
             )
-        result = await self._attach_client.renew_signing(info)
+        try:
+            result = await self._attach_client.renew_signing(info)
+        except LaneError as exc:
+            self._park_signing_failure(info, str(exc))
+            raise
         if not result.ok:
             self._park_signing_failure(info, result.message or "iOS signing renewal failed")
             raise LaneError(
