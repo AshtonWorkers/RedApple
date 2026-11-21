@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import io
 import tarfile
+import uuid
 from pathlib import Path
 from typing import Dict, Mapping
 
@@ -46,8 +47,9 @@ def _safe_member_name(name: str) -> bool:
 
 
 def unpack_harness_files(bundle: bytes, target: Path) -> None:
-    """Extract a harness bundle, rejecting unsafe paths."""
+    """Extract a harness bundle, rejecting unsafe paths and symlink escapes."""
     target.mkdir(parents=True, exist_ok=True)
+    root = target.resolve()
     with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:") as archive:
         for member in archive.getmembers():
             if not member.isfile():
@@ -57,7 +59,11 @@ def unpack_harness_files(bundle: bytes, target: Path) -> None:
             extracted = archive.extractfile(member)
             if extracted is None:
                 continue
-            destination = target / member.name
+            destination = (root / member.name).resolve()
+            try:
+                destination.relative_to(root)
+            except ValueError:
+                raise CasCorrupt(f"unsafe path in harness bundle: {member.name}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(extracted.read())
 
@@ -77,7 +83,7 @@ class ContentAddressedStore:
         path = self._path_for(digest)
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
+            tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
             tmp.write_bytes(data)
             tmp.replace(path)
         return digest

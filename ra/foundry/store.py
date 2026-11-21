@@ -37,6 +37,7 @@ class JsonFoundryStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "foundry_state.json"
+        self._save_lock = asyncio.Lock()
 
     def _read_all_sync(self) -> Dict[str, FoundryState]:
         if not self.path.exists():
@@ -62,12 +63,13 @@ class JsonFoundryStore:
         return states.get(harness_id)
 
     async def save(self, state: FoundryState) -> None:
-        def _save() -> None:
-            states = self._read_all_sync()
-            states[state.harness_id] = state
-            self._write_all_sync(states)
+        async with self._save_lock:
+            def _save() -> None:
+                states = self._read_all_sync()
+                states[state.harness_id] = state
+                self._write_all_sync(states)
 
-        await asyncio.to_thread(_save)
+            await asyncio.to_thread(_save)
 
     async def list_ids(self) -> list[str]:
         states = await asyncio.to_thread(self._read_all_sync)

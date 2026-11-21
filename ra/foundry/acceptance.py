@@ -37,7 +37,9 @@ def evaluate_acceptance(measurements: AcceptanceMeasurements) -> AcceptanceDecis
     evaluated before any side effect by the caller).
     """
     checks = {
-        "compiles": bool(measurements.compiled),
+        "compiles": (
+            bool(measurements.compiled) and bool(measurements.dry_run_completed)
+        ),
         "edges_sec_ge_60pct_surface_median": (
             measurements.surface_median_edges_per_sec > 0
             and measurements.edges_per_sec
@@ -50,7 +52,7 @@ def evaluate_acceptance(measurements: AcceptanceMeasurements) -> AcceptanceDecis
 
     reasons: List[str] = []
     if not checks["compiles"]:
-        reasons.append("compiles: harness did not compile")
+        reasons.append("compiles: harness did not compile or dry run did not complete")
     if not checks["edges_sec_ge_60pct_surface_median"]:
         reasons.append(
             "edges_sec_ge_60pct_surface_median: "

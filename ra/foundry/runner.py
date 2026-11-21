@@ -84,14 +84,17 @@ def compile_harness(
     timeout_seconds: float = 300.0,
 ) -> CompileResult:
     """Compile one harness source into ``workdir``."""
+    spec_directory = spec.directory.resolve()
+    workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     output_name = str(manifest.get("output") or f"{spec.id}_fuzzer")
     output_path = workdir / output_name
+    source_path = (spec_directory / spec.source).resolve()
     compile_args = [str(arg) for arg in manifest.get("compile_args", [])]
     command = (
         resolve_clangxx(manifest, clangxx),
         *compile_args,
-        str(spec.source_path()),
+        str(source_path),
         "-o",
         str(output_path),
     )
@@ -100,7 +103,7 @@ def compile_harness(
     try:
         completed = subprocess.run(
             list(command),
-            cwd=str(spec.directory),
+            cwd=str(spec_directory),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -184,6 +187,8 @@ def measure_harness(
     dry_run_seconds: Optional[float] = None,
 ) -> AcceptanceMeasurements:
     """Compile and dry-run a harness, returning RA-FND-001 measurements."""
+    workdir = Path(workdir).resolve()
+    corpus_dir = Path(corpus_dir).resolve()
     seconds = float(
         dry_run_seconds
         if dry_run_seconds is not None
@@ -200,6 +205,7 @@ def measure_harness(
             parser_malloc_symbol=parser_malloc_symbol,
             dry_run_seconds=0.0,
             compile_seconds=compile_result.seconds,
+            dry_run_completed=False,
         )
 
     binary = workdir / str(manifest.get("output") or f"{spec.id}_fuzzer")
@@ -212,4 +218,5 @@ def measure_harness(
         parser_malloc_symbol=parser_malloc_symbol,
         dry_run_seconds=seconds,
         compile_seconds=compile_result.seconds,
+        dry_run_completed=dry_run.completed,
     )

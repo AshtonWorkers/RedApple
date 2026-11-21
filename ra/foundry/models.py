@@ -62,6 +62,7 @@ class AcceptanceMeasurements:
     parser_malloc_symbol: str = "parser_malloc"
     dry_run_seconds: float = 600.0
     compile_seconds: float = 0.0
+    dry_run_completed: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +73,7 @@ class AcceptanceMeasurements:
             "parser_malloc_symbol": self.parser_malloc_symbol,
             "dry_run_seconds": self.dry_run_seconds,
             "compile_seconds": self.compile_seconds,
+            "dry_run_completed": self.dry_run_completed,
         }
 
 

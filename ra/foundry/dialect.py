@@ -115,6 +115,9 @@ def _validate(instance: Any, schema: Dict[str, Any], path: str = "$") -> None:
         minimum = schema.get("minimum")
         if minimum is not None and instance < minimum:
             _fail(path, f"number {instance} below minimum {minimum}")
+        maximum = schema.get("maximum")
+        if maximum is not None and instance > maximum:
+            _fail(path, f"number {instance} above maximum {maximum}")
 
 
 def load_schema(schema_path: Optional[Path] = None) -> Dict[str, Any]:

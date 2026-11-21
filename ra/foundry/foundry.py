@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from .acceptance import evaluate_acceptance
 from .cas import ContentAddressedStore
@@ -37,6 +37,7 @@ class Foundry:
     def __init__(self, store: FoundryStore, cas: ContentAddressedStore) -> None:
         self.store = store
         self.cas = cas
+        self._submit_locks: Dict[str, asyncio.Lock] = {}
 
     async def load_dialect(self, spec: HarnessSpec) -> Dialect:
         """Load and validate the dialect shipped beside a harness."""
@@ -63,10 +64,23 @@ class Foundry:
             ),
         }
 
+    def _submit_lock(self, harness_id: str) -> asyncio.Lock:
+        lock = self._submit_locks.get(harness_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._submit_locks[harness_id] = lock
+        return lock
+
     async def submit(
         self, spec: HarnessSpec, measurements: AcceptanceMeasurements
     ) -> FoundryOutcome:
         """Validate the dialect, gate acceptance, and persist the attempt."""
+        async with self._submit_lock(spec.id):
+            return await self._submit(spec, measurements)
+
+    async def _submit(
+        self, spec: HarnessSpec, measurements: AcceptanceMeasurements
+    ) -> FoundryOutcome:
         await self.load_dialect(spec)
         decision = evaluate_acceptance(measurements)
 

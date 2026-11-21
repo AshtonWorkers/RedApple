@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ra.foundry import (
     AcceptanceMeasurements,
+    CasCorrupt,
     ContentAddressedStore,
     DialectDefect,
     Foundry,
@@ -16,6 +17,8 @@ from ra.foundry import (
     JsonFoundryStore,
     evaluate_acceptance,
     load_dialect_file,
+    pack_harness_files,
+    unpack_harness_files,
 )
 
 GOOD_COVERAGE = (
@@ -87,6 +90,7 @@ class FoundryTest(unittest.IsolatedAsyncioTestCase):
 
         for bad in (
             measurements(compiled=False),
+            measurements(dry_run_completed=False),
             measurements(edges_per_sec=599.0),
             measurements(coverage_map=BAD_COVERAGE),
         ):
@@ -113,6 +117,11 @@ class FoundryTest(unittest.IsolatedAsyncioTestCase):
             load_dialect_file(
                 self.make_harness(dialect=schema_bad).dialect_path()
             )
+
+        too_many = dict(VALID_DIALECT)
+        too_many["pre_seed"] = [{"box": "meta", "count": 65}]
+        with self.assertRaises(DialectDefect):
+            load_dialect_file(self.make_harness(dialect=too_many).dialect_path())
 
     async def test_RA_FND_003(self) -> None:
         spec = self.make_harness()
@@ -152,6 +161,16 @@ class FoundryTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(result.elapsed_ms, 10_000)
         self.assertEqual((target / spec.source).read_bytes(), original)
         self.assertEqual((target / spec.dialect).read_bytes(), spec.dialect_path().read_bytes())
+
+    async def test_cas_rejects_symlink_escape(self) -> None:
+        outside = self.root / "outside.txt"
+        target = self.root / "extract"
+        target.mkdir()
+        (target / "link").symlink_to(outside)
+        bundle = pack_harness_files({"link": b"payload"})
+        with self.assertRaises(CasCorrupt):
+            unpack_harness_files(bundle, target)
+        self.assertFalse(outside.exists())
 
     async def test_RA_FND_005(self) -> None:
         spec = self.make_harness()
