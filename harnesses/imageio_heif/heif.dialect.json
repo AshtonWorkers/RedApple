@@ -1,0 +1,11 @@
+{
+  "format": "heif",
+  "pre_seed": [
+    {"box": "meta", "pad_to_class": "kalloc_1024"},
+    {"box": "iprp", "count": 8}
+  ],
+  "victim_pad": "align_to_class",
+  "victim_class": "kalloc_2048",
+  "post": {"free": "ipco_before_victim"},
+  "validator": "heap_diff.class_stable"
+}

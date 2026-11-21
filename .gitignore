@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+*_fuzzer
+*.dSYM/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

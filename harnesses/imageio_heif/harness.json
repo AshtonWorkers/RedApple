@@ -1,0 +1,27 @@
+{
+  "id": "imageio_heif",
+  "format": "heif",
+  "surface": "imageio.heif",
+  "source": "LLVMFuzzerTestOneInput.cc",
+  "dialect": "heif.dialect.json",
+  "clangxx": "clang++",
+  "compile_args": [
+    "-g",
+    "-O1",
+    "-fsanitize=fuzzer",
+    "-framework",
+    "ImageIO",
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "CoreGraphics"
+  ],
+  "output": "imageio_heif_fuzzer",
+  "seed_corpus": "corpus",
+  "dry_run_seconds": 600,
+  "surface_median_edges_per_sec": 1000.0,
+  "throughput_metric": "coverage_edges_per_sec",
+  "throughput_caveat": "edges_per_sec is new libFuzzer coverage edges over dry-run wall time after a -runs=0 seed baseline.",
+  "baseline_coverage": true,
+  "parser_malloc_symbol": "parser_malloc"
+}
