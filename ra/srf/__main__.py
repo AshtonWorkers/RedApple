@@ -5,23 +5,28 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+from ..ledger import Ledger
 from .compile import compile_surface
 from .dyld import DyldCache
-from .store import SQLiteEntryPointStore
+from .store import LedgerEntryPointStore
 
 
-async def _run(args: argparse.Namespace) -> Dict[str, Any]:
-    store = SQLiteEntryPointStore(args.db)
-    async with await DyldCache.open(args.cache) as cache:
-        result = await compile_surface(
-            cache,
-            ring_node=args.ring_node,
-            store=store,
-            image_limit=args.limit,
-        )
-    rows = await store.read_ring_node(args.ring_node)
+async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    ledger = await Ledger.open(args.db)
+    try:
+        store = LedgerEntryPointStore(ledger)
+        async with await DyldCache.open(args.cache) as cache:
+            result = await compile_surface(
+                cache,
+                ring_node=args.ring_node,
+                store=store,
+                image_limit=args.limit,
+            )
+        rows = await store.read_ring_node(args.ring_node)
+    finally:
+        await ledger.close()
     return {
         "cache": result.cache_path,
         "ring_node": result.ring_node,
@@ -45,10 +50,10 @@ async def _run(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ra.srf")
     parser.add_argument("--cache", required=True, help="dyld shared cache file or directory")
-    parser.add_argument("--db", default="entry_points.sqlite3", help="SQLite output path")
+    parser.add_argument("--db", default="redapple.sqlite3", help="ledger SQLite path")
     parser.add_argument("--ring-node", default="macos-dyld-cache")
     parser.add_argument(
         "--limit",

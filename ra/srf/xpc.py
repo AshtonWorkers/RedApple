@@ -8,7 +8,7 @@ constants, and score them by structural rules only (RA-SRF-001/002).
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 from .models import XPCField, XPCShape
 
@@ -131,7 +131,7 @@ def probable_xpc_keys(strings: Iterable[str]) -> tuple[XPCField, ...]:
     return tuple(XPCField(name=name, type=_field_type(name)) for name, _ in ranked)
 
 
-def extract_xpc_shape(image_path: str, strings: Iterable[str]) -> Optional[XPCShape]:
+def extract_xpc_shape(image_path: str, strings: Iterable[str]) -> XPCShape | None:
     """Return a deterministic XPC shape for images with XPC markers."""
     materialized = tuple(strings)
     if not image_has_xpc_markers(materialized):

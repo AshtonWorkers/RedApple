@@ -364,6 +364,14 @@ class Ledger:
         result = await self._submit("insert_entry_point", dict(payload))
         return cast(str, result)
 
+    async def replace_entry_points(
+        self, ring_node: str, rows: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """Atomically replace all entry points for one ring node."""
+        payload = {"ring_node": ring_node, "rows": [dict(row) for row in rows]}
+        result = await self._submit("replace_entry_points", payload, rows=len(rows) + 1)
+        return cast(int, result)
+
     async def sweep_artifacts(
         self, ttl_class: str, *, limit: int = 500, min_set: int = 0
     ) -> int:
@@ -420,6 +428,10 @@ class Ledger:
     def ring_node(self, node_id: str) -> dict[str, Any] | None:
         """Fetch one ring node."""
         return self.store.ring_node(node_id)
+
+    def entry_points(self, ring_node: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Entry points for one ring node in rank order."""
+        return self.store.entry_points(ring_node, limit=limit)
 
     def retention_candidates(
         self, ttl_class: str, *, cutoff: int, limit: int

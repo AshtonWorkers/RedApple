@@ -9,8 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any
 
 from .dyld import STRING_SECTION_NAMES, DyldCache
 from .models import (
@@ -89,10 +90,10 @@ MACH_SERVICE_SUFFIXES = (
 @dataclass
 class CompileResult:
     ring_node: str
-    rows: Tuple[Dict[str, Any], ...]
+    rows: tuple[dict[str, Any], ...]
     images_scanned: int
     strings_scanned: int
-    profiles: Tuple[SandboxProfile, ...]
+    profiles: tuple[SandboxProfile, ...]
     xpc_shapes: int
     service_candidates: int
     sha256: str
@@ -102,10 +103,10 @@ class CompileResult:
 @dataclass
 class _Candidate:
     name: str
-    reach: Set[ReachRecord] = field(default_factory=set)
-    fields: Dict[str, str] = field(default_factory=dict)
-    image_paths: Set[str] = field(default_factory=set)
-    granting_profiles: Set[SandboxProfile] = field(default_factory=set)
+    reach: set[ReachRecord] = field(default_factory=set)
+    fields: dict[str, str] = field(default_factory=dict)
+    image_paths: set[str] = field(default_factory=set)
+    granting_profiles: set[SandboxProfile] = field(default_factory=set)
 
     def add_reach(self, record: ReachRecord) -> None:
         self.reach.add(record)
@@ -142,8 +143,8 @@ def _looks_like_mach_service(name: str) -> bool:
     )
 
 
-def _image_service_names(strings: Sequence[str]) -> Set[str]:
-    out: Set[str] = set()
+def _image_service_names(strings: Sequence[str]) -> set[str]:
+    out: set[str] = set()
     for s in strings:
         if not IMAGE_SERVICE_RE.match(s):
             continue
@@ -204,17 +205,17 @@ async def compile_surface(
     cache: DyldCache,
     *,
     ring_node: str = "macos-dyld-cache",
-    store: Optional[EntryPointStore] = None,
+    store: EntryPointStore | None = None,
     section_names: Iterable[str] = STRING_SECTION_NAMES,
-    image_limit: Optional[int] = None,
+    image_limit: int | None = None,
 ) -> CompileResult:
     """Compile the surface graph from an opened dyld cache.
 
     `image_limit` is an explicit reduced-input knob for proof runs; omitted, the
     compiler scans every image in the cache deterministically.
     """
-    candidates: Dict[str, _Candidate] = {}
-    profiles: List[SandboxProfile] = []
+    candidates: dict[str, _Candidate] = {}
+    profiles: list[SandboxProfile] = []
     images_scanned = 0
     strings_scanned = 0
     xpc_shapes = 0
@@ -265,7 +266,7 @@ async def compile_surface(
             if profile_grants_service(profile, cand.name):
                 cand.grant(profile)
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for cand in candidates.values():
         if not cand.reach:
             continue

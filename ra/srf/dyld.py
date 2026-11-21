@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import os
 import struct
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 MAGIC = b"dyld_v1"
 HEADER_SIZE = 0x400
@@ -55,7 +56,7 @@ class MachOSection:
     flags: int
 
     @property
-    def key(self) -> Tuple[str, str]:
+    def key(self) -> tuple[str, str]:
         return (self.segment, self.name)
 
 
@@ -65,14 +66,14 @@ class MachOImage:
     path: str
     filetype: int
     flags: int
-    sections: Tuple[MachOSection, ...]
+    sections: tuple[MachOSection, ...]
 
 
 class _CacheFile:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.name = path.name
-        self._fd: Optional[int] = None
+        self._fd: int | None = None
         self.size = 0
 
     async def open(self) -> None:
@@ -119,7 +120,7 @@ class _CacheFile:
         return self
 
     async def __aexit__(
-        self, exc_type: Optional[type], exc: Optional[BaseException], tb: Optional[Any]
+        self, exc_type: type | None, exc: BaseException | None, tb: Any | None
     ) -> None:
         await self.close()
 
@@ -177,7 +178,7 @@ def parse_macho(data: bytes, image_va: int) -> MachOImage:
     need = 32 + sizeofcmds
     if len(data) < need:
         raise CacheError(f"short Mach-O load commands at {image_va:#x}")
-    sections: List[MachOSection] = []
+    sections: list[MachOSection] = []
     off = 32
     for _ in range(ncmds):
         if off + 8 > need:
@@ -213,9 +214,9 @@ def parse_macho(data: bytes, image_va: int) -> MachOImage:
     )
 
 
-def split_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> List[str]:
+def split_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> list[str]:
     """Deterministic NUL-separated string extraction."""
-    out: List[str] = []
+    out: list[str] = []
     for part in data.split(b"\0"):
         if not part or len(part) > max_len:
             continue
@@ -228,9 +229,9 @@ def split_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> List[str]:
     return out
 
 
-def _utf16_strings(data: bytes, encoding: str, max_len: int) -> List[str]:
+def _utf16_strings(data: bytes, encoding: str, max_len: int) -> list[str]:
     text = data.decode(encoding, "ignore")
-    out: List[str] = []
+    out: list[str] = []
     for part in text.split("\x00"):
         if not part or len(part) > max_len:
             continue
@@ -239,7 +240,7 @@ def _utf16_strings(data: bytes, encoding: str, max_len: int) -> List[str]:
     return out
 
 
-def split_utf16_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> List[str]:
+def split_utf16_strings(data: bytes, *, max_len: int = MAX_STRING_BYTES) -> list[str]:
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return _utf16_strings(data, "utf-16", max_len)
     little = _utf16_strings(data, "utf-16-le", max_len)
@@ -264,11 +265,11 @@ class DyldCache:
         self.path = str(self.files[0].path) if self.files else ""
 
     @classmethod
-    async def open(cls, path: Union[str, Path]) -> DyldCache:
+    async def open(cls, path: str | Path) -> DyldCache:
         root = Path(path)
         candidates = _cache_candidates(root)
-        files: List[_CacheFile] = []
-        headers: List[_Header] = []
+        files: list[_CacheFile] = []
+        headers: list[_Header] = []
         try:
             for cand in candidates:
                 cf = _CacheFile(cand)
@@ -284,7 +285,7 @@ class DyldCache:
                 headers.append(_parse_header(head))
             if not files:
                 raise CacheError(f"no dyld shared cache found at {root}")
-            mappings: List[CacheMapping] = []
+            mappings: list[CacheMapping] = []
             for idx, cf in enumerate(files):
                 h = headers[idx]
                 if h.mapping_count and h.mapping_offset:
@@ -324,9 +325,9 @@ class DyldCache:
         self,
         image: MachOImage,
         names: Iterable[str] = STRING_SECTION_NAMES,
-    ) -> List[str]:
+    ) -> list[str]:
         wanted = set(names)
-        out: List[str] = []
+        out: list[str] = []
         for section in image.sections:
             if section.name not in wanted or section.size <= 0 or section.size > MAX_SECTION_BYTES:
                 continue
@@ -345,7 +346,7 @@ class DyldCache:
         return self
 
     async def __aexit__(
-        self, exc_type: Optional[type], exc: Optional[BaseException], tb: Optional[Any]
+        self, exc_type: type | None, exc: BaseException | None, tb: Any | None
     ) -> None:
         await self.close()
 
@@ -359,13 +360,13 @@ def _native_cache_arch() -> str:
     return ""
 
 
-def _family_paths(directory: Path, stem: str) -> List[Path]:
+def _family_paths(directory: Path, stem: str) -> list[Path]:
     paths = [p for p in directory.glob(stem) if p.is_file()]
     paths += [p for p in directory.glob(stem + ".*") if p.is_file()]
     return sorted(paths)
 
 
-def _cache_candidates(root: Path) -> List[Path]:
+def _cache_candidates(root: Path) -> list[Path]:
     if root.is_file():
         stem = root.name.split(".", 1)[0]
         return _family_paths(root.parent, stem)
@@ -393,8 +394,8 @@ async def _read_va(
 
 async def _load_images(
     files: Sequence[_CacheFile], mappings: Sequence[CacheMapping]
-) -> List[MachOImage]:
-    images: List[MachOImage] = []
+) -> list[MachOImage]:
+    images: list[MachOImage] = []
     headers_by_file = [
         _parse_header(await files[idx].read_at(0, HEADER_SIZE)) for idx in range(len(files))
     ]
@@ -434,8 +435,8 @@ async def _load_images(
 
 async def mappings_for_cache(
     files: Sequence[_CacheFile], headers: Sequence[_Header]
-) -> List[CacheMapping]:
-    mappings: List[CacheMapping] = []
+) -> list[CacheMapping]:
+    mappings: list[CacheMapping] = []
     for idx, h in enumerate(headers):
         if h.mapping_count and h.mapping_offset:
             recs = await files[idx].read_at(h.mapping_offset, 32 * h.mapping_count)

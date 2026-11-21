@@ -10,8 +10,11 @@ import asyncio
 import contextlib
 import json
 import sqlite3
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence, Union
+from typing import Any, Protocol
+
+from ..ledger import Ledger
 
 DDL = """
 CREATE TABLE IF NOT EXISTS entry_point (
@@ -28,26 +31,26 @@ CREATE INDEX IF NOT EXISTS ix_ep_weight ON entry_point(weight DESC, id);
 
 
 class EntryPointStore(Protocol):
-    async def replace_ring_node(self, ring_node: str, rows: Sequence[Dict[str, Any]]) -> None:
+    async def replace_ring_node(self, ring_node: str, rows: Sequence[dict[str, Any]]) -> None:
         ...
 
-    async def read_ring_node(self, ring_node: str) -> List[Dict[str, Any]]:
+    async def read_ring_node(self, ring_node: str) -> list[dict[str, Any]]:
         ...
 
 
 class InMemoryEntryPointStore:
     def __init__(self) -> None:
-        self._rows: Dict[str, List[Dict[str, Any]]] = {}
+        self._rows: dict[str, list[dict[str, Any]]] = {}
 
-    async def replace_ring_node(self, ring_node: str, rows: Sequence[Dict[str, Any]]) -> None:
+    async def replace_ring_node(self, ring_node: str, rows: Sequence[dict[str, Any]]) -> None:
         self._rows[ring_node] = [dict(r) for r in rows]
 
-    async def read_ring_node(self, ring_node: str) -> List[Dict[str, Any]]:
+    async def read_ring_node(self, ring_node: str) -> list[dict[str, Any]]:
         return [dict(r) for r in self._rows.get(ring_node, [])]
 
 
 class SQLiteEntryPointStore:
-    def __init__(self, path: Union[str, Path]) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -56,7 +59,7 @@ class SQLiteEntryPointStore:
         conn.executescript(DDL)
         return conn
 
-    async def replace_ring_node(self, ring_node: str, rows: Sequence[Dict[str, Any]]) -> None:
+    async def replace_ring_node(self, ring_node: str, rows: Sequence[dict[str, Any]]) -> None:
         payload = [dict(r) for r in rows]
 
         def _replace() -> None:
@@ -86,8 +89,8 @@ class SQLiteEntryPointStore:
 
         await asyncio.get_running_loop().run_in_executor(None, _replace)
 
-    async def read_ring_node(self, ring_node: str) -> List[Dict[str, Any]]:
-        def _read() -> List[Dict[str, Any]]:
+    async def read_ring_node(self, ring_node: str) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
             with contextlib.closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
@@ -100,16 +103,16 @@ class SQLiteEntryPointStore:
                     (ring_node,),
                 )
                 cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
+                return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
         return await asyncio.get_running_loop().run_in_executor(None, _read)
 
 
-def rows_to_json(rows: Iterable[Dict[str, Any]]) -> str:
+def rows_to_json(rows: Iterable[dict[str, Any]]) -> str:
     return json.dumps(list(rows), sort_keys=True, separators=(",", ":"))
 
 
-def ledger_entry_point_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
+def ledger_entry_point_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     """Map an RA-SRF row to PR #8 ledger `insert_entry_point` payload shape."""
     return {
         "entry_point_id": row["id"],
@@ -120,3 +123,19 @@ def ledger_entry_point_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
         "weight": row["weight"],
         "ring_node": row["ring_node"],
     }
+
+
+class LedgerEntryPointStore:
+    """Entry-point store backed by the M0 claim ledger."""
+
+    def __init__(self, ledger: Ledger) -> None:
+        self._ledger = ledger
+
+    async def replace_ring_node(self, ring_node: str, rows: Sequence[dict[str, Any]]) -> None:
+        payload = [
+            ledger_entry_point_payload({**dict(row), "ring_node": ring_node}) for row in rows
+        ]
+        await self._ledger.replace_entry_points(ring_node, payload)
+
+    async def read_ring_node(self, ring_node: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._ledger.entry_points(ring_node)]

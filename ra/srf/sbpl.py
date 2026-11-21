@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Optional
 
 SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,120}$")
 
@@ -154,7 +154,7 @@ def _is_allow_deny(form: list[object]) -> bool:
     return len(form) >= 2 and form[0] in {"allow", "deny"}
 
 
-def _operation_of(form: list[object]) -> Optional[str]:
+def _operation_of(form: list[object]) -> str | None:
     if len(form) < 2 or not isinstance(form[1], str):
         return None
     return form[1]
@@ -167,8 +167,8 @@ def looks_like_sbpl(text: str) -> bool:
 
 
 def parse_sbpl_profile(
-    text: str, *, source: str, name: Optional[str] = None
-) -> Optional[SandboxProfile]:
+    text: str, *, source: str, name: str | None = None
+) -> SandboxProfile | None:
     """Parse one SBPL profile document. Returns None when it is not SBPL."""
     if not looks_like_sbpl(text):
         return None

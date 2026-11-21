@@ -604,6 +604,28 @@ class LedgerStore:
         )
         return entry_id
 
+    def _op_replace_entry_points(self, payload: Mapping[str, Any]) -> int:
+        ring_node = _text(payload, "ring_node")
+        rows = _list(payload, "rows")
+        self._conn.execute("DELETE FROM entry_point WHERE ring_node=?", (ring_node,))
+        for row in rows:
+            self._conn.execute(
+                """
+                INSERT INTO entry_point(id, name, reach_from_json, privilege_delta, parser_complexity, weight, ring_node)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    _text(row, "entry_point_id"),
+                    _text(row, "name"),
+                    _text(row, "reach_from_json"),
+                    _int(row, "privilege_delta"),
+                    _float(row, "parser_complexity"),
+                    _float(row, "weight"),
+                    ring_node,
+                ),
+            )
+        return len(rows)
+
     def _op_sweep_artifacts(self, payload: Mapping[str, Any]) -> int:
         # Retention deletes are executed as part of a ledger batch so they share
         # the single-writer mailbox and one transaction (RA-RET-003).
@@ -835,6 +857,21 @@ class LedgerStore:
             (node_id,),
         ).fetchone()
         return None if row is None else dict(row)
+
+    def entry_points(self, ring_node: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Entry points for one ring node in deterministic rank order."""
+        sql = """
+            SELECT id, name, reach_from_json, privilege_delta,
+                   parser_complexity, weight, ring_node
+            FROM entry_point
+            WHERE ring_node = ?
+            ORDER BY weight DESC, id ASC
+        """
+        if limit is None:
+            rows = self._conn.execute(sql, (ring_node,)).fetchall()
+        else:
+            rows = self._conn.execute(sql + " LIMIT ?", (ring_node, limit)).fetchall()
+        return [dict(row) for row in rows]
 
     def retention_candidates(
         self, ttl_class: str, *, cutoff: int, limit: int

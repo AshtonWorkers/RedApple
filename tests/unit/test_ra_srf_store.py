@@ -3,9 +3,11 @@
 import asyncio
 import sqlite3
 
+from ra.ledger import Ledger
 from ra.srf.store import (
     DDL,
     InMemoryEntryPointStore,
+    LedgerEntryPointStore,
     SQLiteEntryPointStore,
     ledger_entry_point_payload,
     rows_to_json,
@@ -67,6 +69,25 @@ def test_RA_SRF_004_sqlite_creates_parent_and_reads_empty_ring(tmp_path):
     assert asyncio.run(store.read_ring_node("missing")) == []
     asyncio.run(store.replace_ring_node("ring", []))
     assert asyncio.run(store.read_ring_node("ring")) == []
+
+
+def test_RA_SRF_004_ledger_store_replaces_ring_node(tmp_path):
+    async def body():
+        ledger = await Ledger.open(tmp_path / "ledger.sqlite")
+        try:
+            store = LedgerEntryPointStore(ledger)
+            await store.replace_ring_node(
+                "ring", [_row("ep_a", "com.apple.a", 1.0), _row("ep_b", "com.apple.b", 0.5)]
+            )
+            await store.replace_ring_node("ring", [_row("ep_b", "com.apple.b", 9.0)])
+            got = await store.read_ring_node("ring")
+            assert [r["id"] for r in got] == ["ep_b"]
+            assert got[0]["weight"] == 9.0
+            assert await store.read_ring_node("other") == []
+        finally:
+            await ledger.close()
+
+    asyncio.run(body())
 
 
 def test_RA_SRF_004_rows_to_json_and_ledger_payload_mapping():
