@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -56,7 +57,8 @@ class PolicyEngine:
 
     def __init__(self, ledger: Ledger, caps: ExecutorCaps) -> None:
         self.ledger = ledger
-        self.executor = Executor(caps, spent_usd_micro=ledger.spent_usd_micro())
+        self.caps = caps
+        self.executor = Executor(caps)
         self._failures: dict[str, int] = {}
 
     async def plan_action(
@@ -104,25 +106,28 @@ class PolicyEngine:
         return wo_id
 
     async def dispatch_ready(self, *, limit: int = 64) -> tuple[int, list[str]]:
-        """Dispatch ready work orders through the executor cap gate."""
+        """Dispatch ready work orders through the atomic executor cap gate."""
+        rows = self.ledger.ready_work_orders(limit=limit)
+        actions = [parse_action(str(row["action"])) for row in rows]
+        outcomes = await asyncio.gather(
+            *(
+                self.ledger.dispatch_work_order(
+                    work_order_id=str(row["id"]),
+                    budget_usd_micro=self.caps.spend_usd_micro,
+                    spent_usd_micro=ACTION_COST_USD_MICRO[action],
+                    observed=float(row["ev_cost"]),
+                    expected=action.value,
+                )
+                for row, action in zip(rows, actions, strict=True)
+            )
+        )
         dispatched = 0
         refusals: list[str] = []
-        for row in self.ledger.ready_work_orders(limit=limit):
-            action = parse_action(str(row["action"]))
-            if not self.executor.admits(action):
+        for row, outcome in zip(rows, outcomes, strict=True):
+            if outcome.get("dispatched") is True:
+                dispatched += 1
+            else:
                 refusals.append(str(row["id"]))
-                continue
-            cost = self.executor.record_spend(action)
-            await self.ledger.record_decision(
-                trigger_metric="dispatch",
-                observed=float(row["ev_cost"]),
-                expected=str(row["action"]),
-                spent_usd_micro=cost,
-                run_id=cast_str(row.get("run_id")),
-                wo_id=str(row["id"]),
-            )
-            await self.ledger.update_work_order_state(str(row["id"]), "done")
-            dispatched += 1
         return dispatched, refusals
 
     async def record_failure(self, unit: str) -> int:

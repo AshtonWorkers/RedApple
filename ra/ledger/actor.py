@@ -30,6 +30,8 @@ class LedgerActor:
         self._queue: asyncio.Queue[LedgerOperation] = asyncio.Queue(maxsize=max_queue)
         self._task: asyncio.Task[None] | None = None
         self._stopped = False
+        self._closing = False
+        self._state_lock = asyncio.Lock()
         self._max_depth = 0
         self._batches = 0
         self._rows = 0
@@ -42,10 +44,13 @@ class LedgerActor:
             self._task = asyncio.create_task(self._run(), name="ra-ledger-actor")
 
     async def stop(self) -> None:
-        """Wait for queued writes, then stop the writer task."""
+        """Reject new writes, wait for queued writes, then stop the writer task."""
         if self._task is None:
+            self._closing = True
             self._stopped = True
             return
+        async with self._state_lock:
+            self._closing = True
         await self._queue.join()
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -62,15 +67,16 @@ class LedgerActor:
         telemetry: bool = False,
     ) -> object:
         """Submit one write; producers await when the bounded mailbox is full."""
-        if self._stopped:
-            raise RaError("ledger actor is stopped", code="LEDGER_STOPPED")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
         operation = LedgerOperation(kind=kind, payload=payload, rows=rows, future=future)
-        if telemetry and self._queue.full():
-            return None
-        await self._queue.put(operation)
-        self._max_depth = max(self._max_depth, self._queue.qsize())
+        async with self._state_lock:
+            if self._closing or self._stopped:
+                raise RaError("ledger actor is stopped", code="LEDGER_STOPPED")
+            if telemetry and self._queue.full():
+                return None
+            await self._queue.put(operation)
+            self._max_depth = max(self._max_depth, self._queue.qsize())
         return await future
 
     def stats(self) -> dict[str, int | float]:

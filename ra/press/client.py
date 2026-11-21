@@ -177,7 +177,10 @@ class ReplayQueue:
         for line in self.path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            value = json.loads(line)
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise FormatFail("replay queue contains malformed JSON") from exc
             if isinstance(value, dict):
                 out.append(value)
         return out

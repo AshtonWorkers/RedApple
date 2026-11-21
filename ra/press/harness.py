@@ -296,5 +296,8 @@ def validate_output(
         path = value.get("path")
         if not isinstance(path, list) or not all(isinstance(item, str) for item in path):
             raise FormatFail("path output requires path list")
-        return {"path": path, "cost": value.get("cost", 0)}
+        cost = value.get("cost", 0)
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            raise FormatFail("path output requires numeric cost")
+        return {"path": path, "cost": cost}
     raise FormatFail(f"unknown grammar {grammar}")

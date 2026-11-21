@@ -26,6 +26,7 @@ CLAIM_TYPES = frozenset(
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
 RUN_MODES = frozenset({"macos", "ios"})
 RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})
+_MISSING: Any = object()
 
 
 def _text(payload: Mapping[str, Any], key: str) -> str:
@@ -116,24 +117,60 @@ class LedgerStore:
         self._conn.close()
 
     def apply_batch(self, operations: Sequence[LedgerOperation]) -> list[object]:
-        """Apply operations atomically; used only by the single-writer actor."""
+        """Apply operations with per-operation savepoints.
+
+        Request-level failures roll back only their own operation; storage
+        failures roll back the whole batch and fail every operation in it.
+        """
         if not operations:
             return []
-        results: list[object] = []
+        results: list[object] = [_MISSING] * len(operations)
+        failures: dict[int, BaseException] = {}
+        storage_error: BaseException | None = None
         try:
             self._conn.execute("BEGIN IMMEDIATE")
-            for operation in operations:
-                results.append(self._apply_operation(operation))
-            self._conn.execute("COMMIT")
         except Exception as exc:
-            with contextlib.suppress(sqlite3.Error):
-                self._conn.execute("ROLLBACK")
             for operation in operations:
                 self._set_future_exception(operation, exc)
             raise
-        for operation, result in zip(operations, results, strict=True):
-            self._set_future_result(operation, result)
-        return results
+        for index, operation in enumerate(operations):
+            savepoint = f"ra_op_{index}"
+            self._conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                results[index] = self._apply_operation(operation)
+            except RaError as exc:
+                self._rollback_to_savepoint(savepoint)
+                failures[index] = exc
+            except sqlite3.IntegrityError as exc:
+                self._rollback_to_savepoint(savepoint)
+                failures[index] = FormatFail(f"ledger operation {operation.kind} failed: {exc}")
+            except sqlite3.Error as exc:
+                with contextlib.suppress(sqlite3.Error):
+                    self._conn.execute("ROLLBACK")
+                storage_error = exc
+                break
+            except Exception as exc:
+                self._rollback_to_savepoint(savepoint)
+                failures[index] = exc
+            else:
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        if storage_error is None:
+            try:
+                self._conn.execute("COMMIT")
+            except Exception as exc:
+                with contextlib.suppress(sqlite3.Error):
+                    self._conn.execute("ROLLBACK")
+                storage_error = exc
+        if storage_error is not None:
+            for operation in operations:
+                self._set_future_exception(operation, storage_error)
+            raise storage_error
+        for index, operation in enumerate(operations):
+            if index in failures:
+                self._set_future_exception(operation, failures[index])
+            elif results[index] is not _MISSING:
+                self._set_future_result(operation, results[index])
+        return [None if index in failures else results[index] for index in range(len(operations))]
 
     @staticmethod
     def _set_future_result(operation: LedgerOperation, result: object) -> None:
@@ -144,6 +181,12 @@ class LedgerStore:
     def _set_future_exception(operation: LedgerOperation, exc: BaseException) -> None:
         if operation.future is not None and not operation.future.done():
             operation.future.set_exception(exc)
+
+    def _rollback_to_savepoint(self, savepoint: str) -> None:
+        with contextlib.suppress(sqlite3.Error):
+            self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        with contextlib.suppress(sqlite3.Error):
+            self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     def _apply_operation(self, operation: LedgerOperation) -> object:
         handler = getattr(self, f"_op_{operation.kind}", None)
@@ -180,30 +223,7 @@ class LedgerStore:
         return cursor.rowcount == 1
 
     def _op_put_artifact(self, payload: Mapping[str, Any]) -> str:
-        artifact_id = _text(payload, "artifact_id")
-        kind = _text(payload, "kind")
-        sha256 = _text(payload, "sha256")
-        ttl_class = _text(payload, "ttl_class")
-        if ttl_class not in TTL_CLASSES:
-            raise FormatFail("artifact ttl_class is invalid")
-        if len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256):
-            raise FormatFail("artifact sha256 must be lowercase hex")
-        self._conn.execute(
-            """
-            INSERT INTO artifact(id, kind, sha256, bytes, created, ttl_class)
-            VALUES(?,?,?,?,?,?)
-            ON CONFLICT(id) DO NOTHING
-            """,
-            (
-                artifact_id,
-                kind,
-                sha256,
-                _int(payload, "bytes"),
-                _int(payload, "created"),
-                ttl_class,
-            ),
-        )
-        return artifact_id
+        return self._upsert_artifact_row(payload)
 
     def _op_create_claim(self, payload: Mapping[str, Any]) -> str:
         claim = _claim_input_from_payload(payload)
@@ -245,8 +265,11 @@ class LedgerStore:
         row = self._conn.execute("SELECT state FROM claim WHERE id=?", (claim_id,)).fetchone()
         if row is None:
             raise FormatFail("claim does not exist")
-        current = ClaimState(str(row["state"]))
-        target = ClaimState(to_state)
+        try:
+            current = ClaimState(str(row["state"]))
+            target = ClaimState(to_state)
+        except ValueError as exc:
+            raise FormatFail("claim state is invalid") from exc
         idem = self._conn.execute(
             "SELECT 1 FROM idem WHERE entity='claim' AND entity_id=? AND to_state=?",
             (claim_id, target.value),
@@ -266,6 +289,12 @@ class LedgerStore:
             ).fetchone()
             if int(count["n"]) == 0:
                 raise FormatFail("claim with zero artifact links cannot leave limbo")
+        if target is ClaimState.PROMOTED:
+            count = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM claim_artifact WHERE claim_id=?", (claim_id,)
+            ).fetchone()
+            if int(count["n"]) == 0:
+                raise FormatFail("promoted claim requires artifact links")
         self._conn.execute("UPDATE claim SET state=? WHERE id=?", (target.value, claim_id))
         self._conn.execute(
             "INSERT INTO audit(entity, entity_id, from_state, to_state, created) VALUES(?,?,?,?,?)",
@@ -348,6 +377,70 @@ class LedgerStore:
             ),
         )
         return cursor.rowcount == 1
+
+    def _op_dispatch_work_order(self, payload: Mapping[str, Any]) -> dict[str, object]:
+        work_order_id = _text(payload, "work_order_id")
+        row = self._conn.execute(
+            "SELECT id, run_id, action, ev_cost, state FROM work_order WHERE id=?",
+            (work_order_id,),
+        ).fetchone()
+        if row is None:
+            return {"dispatched": False, "reason": "missing", "work_order_id": work_order_id}
+        state = str(row["state"])
+        run_id_value = row["run_id"]
+        scope_run_id = str(run_id_value) if run_id_value is not None else None
+        if state != "ready":
+            return {
+                "dispatched": False,
+                "reason": "not_ready",
+                "state": state,
+                "work_order_id": work_order_id,
+            }
+        budget = _int(payload, "budget_usd_micro")
+        cost = _int(payload, "spent_usd_micro")
+        if budget < 0 or cost < 0:
+            raise FormatFail("dispatch money values must be non-negative")
+        spent = self._spent_for_scope(scope_run_id)
+        if spent + cost > budget:
+            return {
+                "dispatched": False,
+                "reason": "budget",
+                "spent_usd_micro": spent,
+                "budget_usd_micro": budget,
+                "work_order_id": work_order_id,
+            }
+        cursor = self._conn.execute(
+            "UPDATE work_order SET state='done' WHERE id=? AND state='ready'",
+            (work_order_id,),
+        )
+        if cursor.rowcount != 1:
+            return {
+                "dispatched": False,
+                "reason": "not_ready",
+                "state": "done",
+                "work_order_id": work_order_id,
+            }
+        self._conn.execute(
+            """
+            INSERT INTO decision(run_id, wo_id, trigger_metric, observed, expected, spent_usd_micro, created)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                scope_run_id,
+                work_order_id,
+                _text(payload, "trigger_metric"),
+                _float(payload, "observed"),
+                _text(payload, "expected"),
+                cost,
+                _int(payload, "created"),
+            ),
+        )
+        return {
+            "dispatched": True,
+            "cost_usd_micro": cost,
+            "run_id": scope_run_id,
+            "work_order_id": work_order_id,
+        }
 
     def _op_record_packet_log(self, payload: Mapping[str, Any]) -> str:
         packet_id = _text(payload, "packet_id")
@@ -491,14 +584,59 @@ class LedgerStore:
     def _op_sweep_artifacts(self, payload: Mapping[str, Any]) -> int:
         # Retention deletes are executed as part of a ledger batch so they share
         # the single-writer mailbox and one transaction (RA-RET-003).
-        cursor = self._conn.execute(
-            "DELETE FROM artifact WHERE id IN (SELECT id FROM artifact WHERE ttl_class=? ORDER BY created, id LIMIT ?)",
-            (_text(payload, "ttl_class"), _int(payload, "limit")),
+        ttl_class = _text(payload, "ttl_class")
+        if ttl_class not in TTL_CLASSES:
+            raise FormatFail("artifact ttl_class is invalid")
+        if ttl_class == "pinned":
+            raise FormatFail("pinned artifacts are not retention-eligible")
+        limit = _int(payload, "limit")
+        if limit < 0:
+            raise FormatFail("retention limit must be >= 0")
+        rows = self._conn.execute(
+            """
+            SELECT id FROM artifact
+            WHERE ttl_class=?
+              AND NOT EXISTS (
+                SELECT 1 FROM claim_artifact ca
+                JOIN claim c ON c.id = ca.claim_id
+                WHERE ca.artifact_id = artifact.id
+                  AND (
+                    c.state = 'promoted'
+                    OR c.id IN (SELECT a_claim FROM "join" WHERE state='live')
+                    OR c.id IN (SELECT b_claim FROM "join" WHERE state='live')
+                  )
+              )
+            ORDER BY created, id LIMIT ?
+            """,
+            (ttl_class, limit),
+        ).fetchall()
+        ids = [{"artifact_id": str(row["id"])} for row in rows]
+        return self._op_delete_artifacts(
+            {"artifact_ids": ids, "min_set": _int(payload, "min_set")}
         )
-        return int(cursor.rowcount)
+
+    def _artifact_protected(self, artifact_id_value: str) -> bool:
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM claim_artifact ca
+            JOIN claim c ON c.id = ca.claim_id
+            WHERE ca.artifact_id=?
+              AND (
+                c.state = 'promoted'
+                OR c.id IN (SELECT a_claim FROM "join" WHERE state='live')
+                OR c.id IN (SELECT b_claim FROM "join" WHERE state='live')
+              )
+            LIMIT 1
+            """,
+            (artifact_id_value,),
+        ).fetchone()
+        return row is not None
 
     def _op_delete_artifacts(self, payload: Mapping[str, Any]) -> int:
         ids = _list(payload, "artifact_ids")
+        min_set = _int(payload, "min_set")
+        if min_set < 0:
+            raise FormatFail("retention min_set must be >= 0")
         deleted = 0
         for item in ids:
             artifact_id_value = _text(item, "artifact_id")
@@ -507,6 +645,10 @@ class LedgerStore:
             ).fetchone()
             if row is None or str(row["ttl_class"]) == "pinned":
                 continue
+            if self._artifact_protected(artifact_id_value):
+                continue
+            if self.artifact_count() <= min_set:
+                break
             self._conn.execute(
                 "DELETE FROM claim_artifact WHERE artifact_id=?", (artifact_id_value,)
             )
@@ -514,22 +656,39 @@ class LedgerStore:
             deleted += int(cursor.rowcount)
         return deleted
 
-    def _insert_artifact_row(self, artifact: Mapping[str, Any]) -> None:
+    def _upsert_artifact_row(self, artifact: Mapping[str, Any]) -> str:
+        artifact_id_value = _text(artifact, "artifact_id")
+        sha256 = _text(artifact, "sha256")
+        ttl_class = _text(artifact, "ttl_class")
+        if ttl_class not in TTL_CLASSES:
+            raise FormatFail("artifact ttl_class is invalid")
+        if len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256):
+            raise FormatFail("artifact sha256 must be lowercase hex")
+        if artifact_id_value != f"art_{sha256}":
+            raise FormatFail("artifact id must be content-addressed")
         self._conn.execute(
             """
             INSERT INTO artifact(id, kind, sha256, bytes, created, ttl_class)
             VALUES(?,?,?,?,?,?)
-            ON CONFLICT(id) DO NOTHING
+            ON CONFLICT(id) DO UPDATE SET ttl_class = CASE
+              WHEN artifact.ttl_class = 'pinned' OR excluded.ttl_class = 'pinned' THEN 'pinned'
+              WHEN artifact.ttl_class = 'run' OR excluded.ttl_class = 'run' THEN 'run'
+              ELSE 'ephemeral'
+            END
             """,
             (
-                _text(artifact, "artifact_id"),
+                artifact_id_value,
                 _text(artifact, "kind"),
-                _text(artifact, "sha256"),
+                sha256,
                 _int(artifact, "bytes"),
                 _int(artifact, "created"),
-                _text(artifact, "ttl_class"),
+                ttl_class,
             ),
         )
+        return artifact_id_value
+
+    def _insert_artifact_row(self, artifact: Mapping[str, Any]) -> None:
+        self._upsert_artifact_row(artifact)
 
     # Read-side helpers (same connection, still no direct module access).
     def get_claim(self, claim_id: str) -> dict[str, Any] | None:
@@ -604,6 +763,18 @@ class LedgerStore:
         if run_id is None:
             row = self._conn.execute(
                 "SELECT COALESCE(SUM(spent_usd_micro),0) AS n FROM decision"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(spent_usd_micro),0) AS n FROM decision WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def _spent_for_scope(self, run_id: str | None) -> int:
+        if run_id is None:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(spent_usd_micro),0) AS n FROM decision WHERE run_id IS NULL"
             ).fetchone()
         else:
             row = self._conn.execute(

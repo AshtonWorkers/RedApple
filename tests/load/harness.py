@@ -37,8 +37,8 @@ def percentile(values: list[float], q: float) -> float:
 def rss_mb() -> float:
     """Return process RSS in MiB."""
     usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    scale = 1.0 if sys.platform == "darwin" else 1024.0
-    return round(usage / scale / (1024 * 1024), 2)
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    return round(usage / divisor, 2)
 
 
 async def run_load(crashes: int, rate: float, db_path: Path, out_path: Path) -> dict[str, object]:
@@ -48,7 +48,7 @@ async def run_load(crashes: int, rate: float, db_path: Path, out_path: Path) -> 
         max_queue=1024,
         max_batch_rows=25,
         max_batch_ms=25,
-        wal_autocheckpoint=100000,
+        wal_autocheckpoint=0,
     )
     lane = FakeLane(tier=Tier.C, crash_every=1)
     compiler = PacketCompiler()

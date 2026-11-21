@@ -22,7 +22,17 @@ dev = [
 ra = "ra.cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["ra*"]
+include = ["ra*", "grammars*", "schemas*", "migrations*", "models*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+grammars = ["*.json"]
+schemas = ["*.json"]
+migrations = ["*.sql"]
+models = ["*.json"]
+
+[tool.setuptools.data-files]
+"." = ["redapple.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

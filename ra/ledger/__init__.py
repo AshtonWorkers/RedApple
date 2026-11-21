@@ -239,6 +239,33 @@ class Ledger:
         )
         return cast(bool, result)
 
+    async def dispatch_work_order(
+        self,
+        *,
+        work_order_id: str,
+        budget_usd_micro: int,
+        spent_usd_micro: int,
+        trigger_metric: str = "dispatch",
+        observed: float = 0.0,
+        expected: str = "",
+        created: int | None = None,
+    ) -> dict[str, object]:
+        """Atomically gate, spend, decide, and complete one ready work order."""
+        result = await self._submit(
+            "dispatch_work_order",
+            {
+                "work_order_id": work_order_id,
+                "budget_usd_micro": budget_usd_micro,
+                "spent_usd_micro": spent_usd_micro,
+                "trigger_metric": trigger_metric,
+                "observed": observed,
+                "expected": expected,
+                "created": now_ms() if created is None else created,
+            },
+            rows=2,
+        )
+        return cast(dict[str, object], result)
+
     async def record_packet_log(
         self,
         *,
@@ -292,9 +319,14 @@ class Ledger:
         )
         return cast(int, result)
 
-    async def delete_artifacts(self, artifact_ids: Sequence[str]) -> int:
+    async def delete_artifacts(
+        self, artifact_ids: Sequence[str], *, min_set: int = 0
+    ) -> int:
         """Delete retention-eligible artifacts and their claim links."""
-        payload = {"artifact_ids": [{"artifact_id": item} for item in artifact_ids]}
+        payload = {
+            "artifact_ids": [{"artifact_id": item} for item in artifact_ids],
+            "min_set": min_set,
+        }
         result = await self._submit("delete_artifacts", payload, rows=2 * len(artifact_ids))
         return cast(int, result)
 
@@ -330,10 +362,14 @@ class Ledger:
         result = await self._submit("insert_entry_point", dict(payload))
         return cast(str, result)
 
-    async def sweep_artifacts(self, ttl_class: str, *, limit: int = 500) -> int:
+    async def sweep_artifacts(
+        self, ttl_class: str, *, limit: int = 500, min_set: int = 0
+    ) -> int:
         """Delete a batch of artifacts by TTL class (retention sweep helper)."""
         result = await self._submit(
-            "sweep_artifacts", {"ttl_class": ttl_class, "limit": limit}, rows=limit
+            "sweep_artifacts",
+            {"ttl_class": ttl_class, "limit": limit, "min_set": min_set},
+            rows=limit,
         )
         return cast(int, result)
 

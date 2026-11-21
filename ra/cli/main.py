@@ -122,6 +122,8 @@ async def _cmd_attach(args: argparse.Namespace) -> int:
     load_config(args.config)
     ledger = await Ledger.open(args.db)
     try:
+        if args.ring_node is not None and ledger.ring_node(args.ring_node) is None:
+            raise FormatFail(f"unknown ring node {args.ring_node}")
         payload = {
             "udid": args.udid,
             "build": args.build,
@@ -187,7 +189,10 @@ def route_for_task_types() -> tuple[Any, ...]:
 def _cmd_golden(args: argparse.Namespace) -> int:
     load_config(args.config)
     path = args.file or Path("tests/golden") / f"{args.type}.jsonl"
-    cases = load_golden(path, args.type)
+    try:
+        cases = load_golden(path, args.type)
+    except (OSError, ValueError) as exc:
+        raise FormatFail(f"cannot load golden set {path}: {exc}") from exc
     baseline = None
     if args.baseline is not None:
         baseline = float(json.loads(args.baseline.read_text(encoding="utf-8"))["score"])
@@ -351,13 +356,22 @@ def worker_formula(ram_gb: float | None = None, cores: int | None = None) -> dic
 
 
 def _detect_ram_gb() -> float | None:
-    try:
-        import subprocess
+    if sys.platform == "darwin":
+        try:
+            import subprocess
 
-        out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True, timeout=2)
-        return round(int(out.strip()) / (1024**3), 2)
-    except Exception:
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True, timeout=2)
+            return round(int(out.strip()) / (1024**3), 2)
+        except Exception:
+            return None
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                kib = int(line.split()[1])
+                return round(kib * 1024 / (1024**3), 2)
+    except (OSError, ValueError, IndexError):
         return None
+    return None
 
 
 def disk_free_gb(path: str) -> float | None:

@@ -41,7 +41,7 @@ class PacketCompiler:
     """Compile packets and cache them by SHA for 24 hours."""
 
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[float, CompiledPacket]] = {}
+        self._cache: dict[tuple[str, str], tuple[float, CompiledPacket]] = {}
 
     def compile(self, packet: Packet) -> CompiledPacket:
         """Compile ``packet`` to canonical bytes within its task budget."""
@@ -87,8 +87,9 @@ class PacketCompiler:
 
     def _cache_get_or_store(self, compiled: CompiledPacket) -> CompiledPacket:
         now = time.monotonic()
-        cached = self._cache.get(compiled.sha)
+        key = (compiled.task_type.value, compiled.sha)
+        cached = self._cache.get(key)
         if cached is not None and now - cached[0] < _CACHE_TTL_S:
             return cached[1]
-        self._cache[compiled.sha] = (now, compiled)
+        self._cache[key] = (now, compiled)
         return compiled

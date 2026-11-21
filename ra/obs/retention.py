@@ -42,16 +42,17 @@ async def sweep(
     deleted = {"ephemeral": 0, "run": 0, "batches": 0, "remaining": ledger.artifact_count()}
     for ttl_class in ("ephemeral", "run"):
         while True:
-            if ledger.artifact_count() <= policy.min_set:
+            allowance = ledger.artifact_count() - policy.min_set
+            if allowance <= 0:
                 deleted["remaining"] = ledger.artifact_count()
                 return deleted
             candidates = ledger.retention_candidates(
-                ttl_class, cutoff=cutoffs[ttl_class], limit=policy.batch_size
+                ttl_class, cutoff=cutoffs[ttl_class], limit=min(policy.batch_size, allowance)
             )
             if not candidates:
                 break
             ids = [str(row["id"]) for row in candidates]
-            removed = await ledger.delete_artifacts(ids)
+            removed = await ledger.delete_artifacts(ids, min_set=policy.min_set)
             deleted[ttl_class] += removed
             deleted["batches"] += 1
             deleted["remaining"] = ledger.artifact_count()
