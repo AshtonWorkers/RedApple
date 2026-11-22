@@ -108,6 +108,55 @@ class LibimobiledeviceIosAttachClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(checked.trusted, False)
         self.assertIs(checked.developer_mode, False)
 
+    async def test_dev_mode_status_parsing(self) -> None:
+        cases = [
+            ("enabled", True),
+            ("Enabled", True),
+            ("Developer Mode is enabled", True),
+            ("1", True),
+            ("true", True),
+            ("disabled", False),
+            ("Disabled", False),
+            ("Developer Mode is disabled", False),
+            ("0", False),
+            ("false", False),
+            ("not enabled", False),
+            ("Developer Mode is not enabled", False),
+            ("isn't enabled", False),
+            ("cannot be enabled", False),
+            ("unknown", None),
+            ("maybe enabled", None),
+            ("enabled disabled", None),
+            ("", None),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                runner = ScriptedRunner(
+                    {
+                        ("idevicepair", "validate", "-u", "udid"): res(["idevicepair"]),
+                        ("ideviceinfo", "-u", "udid", "-k", "DeveloperModeStatus"): res(
+                            ["ideviceinfo"], out=f"{raw}\n"
+                        ),
+                    }
+                )
+                checked = await LibimobiledeviceIosAttachClient(runner=runner).check_trust_dev_mode(
+                    IosDeviceInfo(udid="udid")
+                )
+                self.assertIs(checked.developer_mode, expected)
+
+        runner = ScriptedRunner(
+            {
+                ("idevicepair", "validate", "-u", "udid"): res(["idevicepair"]),
+                ("ideviceinfo", "-u", "udid", "-k", "DeveloperModeStatus"): res(
+                    ["ideviceinfo"], rc=1
+                ),
+            }
+        )
+        checked = await LibimobiledeviceIosAttachClient(runner=runner).check_trust_dev_mode(
+            IosDeviceInfo(udid="udid")
+        )
+        self.assertIs(checked.developer_mode, None)
+
     async def test_mount_ddi_success_and_failure(self) -> None:
         info = IosDeviceInfo(udid="udid")
         runner = ScriptedRunner(

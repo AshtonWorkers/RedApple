@@ -9,6 +9,7 @@ device-gated and are documented in ``README.md``.
 from __future__ import annotations
 
 import plistlib
+import re
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -24,6 +25,18 @@ from ra.lanes.base import (
     Thermal,
 )
 from ra.lanes.commands import CommandResult, CommandRunner, SubprocessRunner
+
+_DEV_MODE_TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enable", "enabled"})
+_DEV_MODE_FALSE_TOKENS = frozenset({"0", "false", "no", "off", "disable", "disabled"})
+_DEV_MODE_HEDGE_TOKENS = frozenset(
+    {"maybe", "perhaps", "possibly", "probably", "might", "could", "may", "unsure", "unknown", "unclear"}
+)
+# Negated "enabled" phrases ("not enabled", "isn't enabled", "cannot be enabled")
+# are rewritten to "disabled" so the bare "enable" substring never wins.
+_DEV_MODE_NEGATED_ENABLED = re.compile(
+    r"\b(?:not|never|cannot|cant|can't|isnt|isn't|aint|ain't|wont|won't|"
+    r"doesnt|doesn't|dont|don't|didnt|didn't)\b(?:\s+[a-z]+){0,3}\s+enabled\b"
+)
 
 
 @dataclass
@@ -268,11 +281,17 @@ class LibimobiledeviceIosAttachClient:
         if value is None:
             return None
         text = str(value).strip().lower()
-        if "enable" in text or text == "1" or text == "true":
-            return True
-        if "disable" in text or text == "0" or text == "false":
-            return False
-        return None
+        if not text:
+            return None
+        text = _DEV_MODE_NEGATED_ENABLED.sub(" disabled ", text)
+        tokens = set(re.findall(r"[a-z0-9]+", text))
+        has_true = not tokens.isdisjoint(_DEV_MODE_TRUE_TOKENS)
+        has_false = not tokens.isdisjoint(_DEV_MODE_FALSE_TOKENS)
+        if has_true == has_false:
+            return None
+        if has_true and not tokens.isdisjoint(_DEV_MODE_HEDGE_TOKENS):
+            return None
+        return has_true
 
     @staticmethod
     def _looks_signing_expired(res: CommandResult) -> bool:

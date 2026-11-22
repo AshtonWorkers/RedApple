@@ -243,7 +243,8 @@ class IOSTierCLane(BaseLane):
         if transport is None:
             raise LaneError(
                 LaneErrorCode.NOT_PROVISIONED,
-                "iOS Tier C feed requires a configured JscTransport",
+                "iOS Tier C feed requires a configured JscTransport (device-gated)",
+                details={"device_gated": True},
             )
         return await transport.eval(handle, data)
 

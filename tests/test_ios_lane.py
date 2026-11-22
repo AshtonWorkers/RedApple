@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import plistlib
 import time
 import unittest
 from dataclasses import replace
@@ -19,7 +20,8 @@ from ra.lanes.base import (
     Thermal,
     Tier,
 )
-from ra.lanes.ios.client import IosDeviceInfo, IosInstallResult
+from ra.lanes.commands import CommandResult
+from ra.lanes.ios.client import IosDeviceInfo, IosInstallResult, LibimobiledeviceIosAttachClient
 from ra.lanes.ios.lane import IOSTierCLane
 
 
@@ -184,6 +186,54 @@ class FakeJscTransport:
             raise self.close_error
 
 
+class ScriptedRunner:
+    """CommandRunner fake keyed by exact argv; unknown argv succeeds empty."""
+
+    def __init__(self, responses: dict[tuple[str, ...], CommandResult]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run(self, argv, **kwargs) -> CommandResult:
+        argv = tuple(str(part) for part in argv)
+        self.calls.append(argv)
+        return self.responses.get(argv, CommandResult(argv, 0, "", "", 1))
+
+
+def scripted_ios_provision(dev_status: str) -> dict[tuple[str, ...], CommandResult]:
+    """Scripted libimobiledevice/pymobiledevice3 responses for a full provision run."""
+
+    def cr(argv: tuple[str, ...], out: str = "") -> CommandResult:
+        return CommandResult(argv, 0, out, "", 1)
+
+    plist = plistlib.dumps(
+        {
+            "Trusted": True,
+            "DeveloperModeStatus": dev_status,
+            "BuildVersion": "22A3354",
+            "ProductType": "iPhone15,2",
+            "ProductVersion": "18.0",
+            "bundle_id": "com.redapple.jsc",
+            "harness_app": "/tmp/RedAppleJSC.app",
+        },
+        fmt=plistlib.FMT_XML,
+    ).decode()
+    return {
+        ("idevice_id", "-l"): cr(("idevice_id", "-l"), "udid\n"),
+        ("ideviceinfo", "-u", "udid", "-x"): cr(("ideviceinfo", "-u", "udid", "-x"), plist),
+        ("idevicepair", "validate", "-u", "udid"): cr(("idevicepair", "validate", "-u", "udid")),
+        ("ideviceinfo", "-u", "udid", "-k", "DeveloperModeStatus"): cr(
+            ("ideviceinfo", "-u", "udid", "-k", "DeveloperModeStatus"), f"{dev_status}\n"
+        ),
+        ("pymobiledevice3", "mounter", "auto-mount", "--udid", "udid"): cr(
+            ("pymobiledevice3", "mounter", "auto-mount", "--udid", "udid"), "mounted\n"
+        ),
+        ("install", "udid", "/tmp/RedAppleJSC.app"): cr(
+            ("install", "udid", "/tmp/RedAppleJSC.app"), "installed\n"
+        ),
+        ("probe", "udid"): cr(("probe", "udid"), "capability: javascriptcore\n"),
+    }
+
+
 class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
     def make_profile(self) -> DeviceProfile:
         return DeviceProfile(
@@ -326,6 +376,56 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(cm.exception.code, LaneErrorCode.NOT_PROVISIONED)
         self.assertTrue(cm.exception.details.get("device_gated"))
 
+    async def test_scripted_client_dev_mode_status_gates_provision(self) -> None:
+        cases = [
+            ("enabled", True),
+            ("1", True),
+            ("Developer Mode is enabled", True),
+            ("not enabled", False),
+            ("Developer Mode is not enabled", False),
+            ("disabled", False),
+            ("0", False),
+            ("unknown", False),
+        ]
+        for dev_status, expect_ready in cases:
+            with self.subTest(dev_status=dev_status):
+                cards: list[HumanCard] = []
+                runner = ScriptedRunner(scripted_ios_provision(dev_status))
+                client = LibimobiledeviceIosAttachClient(
+                    runner=runner,
+                    install_command=["install", "{udid}", "{harness_app}"],
+                    probe_command=["probe", "{udid}"],
+                )
+                lane = IOSTierCLane(
+                    attach_client=client,
+                    jsc_transport=FakeJscTransport(),
+                    card_sink=cards.append,
+                )
+                profile = DeviceProfile(
+                    udid="udid",
+                    ring_node="node-ios",
+                    state="attached",
+                    tier=Tier.C,
+                    build="22A3354",
+                )
+                result = await lane.provision(profile)
+                if expect_ready:
+                    self.assertIs(result.state, ProvisionState.READY)
+                    self.assertIs(result.tier, Tier.C)
+                    self.assertEqual(profile.state, "ready")
+                    self.assertIs(profile.tier, Tier.C)
+                    self.assertEqual(cards, [])
+                else:
+                    self.assertIs(result.state, ProvisionState.NEEDS_HAND)
+                    self.assertEqual(profile.state, "needs_hand")
+                    self.assertEqual(len(cards), 1)
+                    self.assertEqual(cards[0].action, "trust_enable_developer_mode")
+                    self.assertIsNot(cards[0].metadata["developer_mode"], True)
+                    self.assertEqual(
+                        runner.calls[-1],
+                        ("ideviceinfo", "-u", "udid", "-k", "DeveloperModeStatus"),
+                    )
+
     async def test_signing_renewal_runs_on_launch_when_near_expiry(self) -> None:
         now_ms = int(time.time() * 1000)
         client = FakeAttachClient(signing_expires_ms=now_ms + 1000)
@@ -395,6 +495,7 @@ class IOSTierCLaneTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LaneError) as cm:
             await lane.feed(handle, b"x")
         self.assertIs(cm.exception.code, LaneErrorCode.NOT_PROVISIONED)
+        self.assertTrue(cm.exception.details.get("device_gated"))
         self.assertEqual(transport.evals, [])
 
     async def test_teardown_closes_handles_and_suppresses_errors(self) -> None:
