@@ -1,1 +1,86 @@
-"""Triage skeleton (RA-TRG; implementation is post-M0)."""
+"""Crash triage and bug-class classification (RA-TRG)."""
+
+from .assessment import (
+    PressTriageAssessor,
+    UnavailableVariantReplayer,
+    VariantReplayer,
+    exploitability_signals,
+    heuristic_assessment,
+    normalize_assessment,
+    parse_json_object,
+)
+from .classifier import BugClassClassifier, PressBugClassClassifier
+from .dedup import (
+    DEDUP_THRESHOLD,
+    MINHASH_SIZE,
+    TriageDeduper,
+    build_signature,
+    minhash128,
+    minhash_similarity,
+    signature_elements,
+)
+from .evidence import (
+    bug_class_hint,
+    crash_class_hint,
+    evidence_text,
+    extract_frames,
+    normalize_frame,
+)
+from .models import (
+    BUG_CLASS_VOCAB,
+    CRASH_CLASS_VOCAB,
+    AssessmentResult,
+    BugClass,
+    ClassifyResult,
+    ClassifyStatus,
+    CrashEvidence,
+    DedupSignature,
+    PacketRef,
+    PocResult,
+    SymbolizedCrash,
+    TriageClaimResult,
+    TriageStatus,
+)
+from .service import TriageService
+from .symbolication import DefaultSymbolicator, StubLaneSymbolicator, SymbolicationProvider
+
+__all__ = [
+    "BUG_CLASS_VOCAB",
+    "CRASH_CLASS_VOCAB",
+    "DEDUP_THRESHOLD",
+    "MINHASH_SIZE",
+    "AssessmentResult",
+    "BugClass",
+    "BugClassClassifier",
+    "ClassifyResult",
+    "ClassifyStatus",
+    "CrashEvidence",
+    "DedupSignature",
+    "DefaultSymbolicator",
+    "PacketRef",
+    "PocResult",
+    "PressBugClassClassifier",
+    "PressTriageAssessor",
+    "StubLaneSymbolicator",
+    "SymbolicationProvider",
+    "SymbolizedCrash",
+    "TriageClaimResult",
+    "TriageDeduper",
+    "TriageService",
+    "TriageStatus",
+    "UnavailableVariantReplayer",
+    "VariantReplayer",
+    "bug_class_hint",
+    "crash_class_hint",
+    "build_signature",
+    "evidence_text",
+    "exploitability_signals",
+    "extract_frames",
+    "heuristic_assessment",
+    "minhash128",
+    "minhash_similarity",
+    "normalize_assessment",
+    "normalize_frame",
+    "parse_json_object",
+    "signature_elements",
+]
