@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS ring_node(id TEXT PRIMARY KEY, ipsw_sha TEXT NOT NULL
 
 CREATE TABLE IF NOT EXISTS device_profile(udid TEXT PRIMARY KEY, build TEXT,
   tier TEXT CHECK(tier IN ('A','B','C')),
-  state TEXT NOT NULL CHECK(state IN ('attached','needs_hand','ready','failed')),
+  state TEXT NOT NULL CHECK(state IN ('attached','needs_hand','ready','failed',
+    'completed','drained','thermal_pause','budget_exhausted')),
   thermal TEXT CHECK(thermal IN ('nominal','serious','critical')),
   crashes INT DEFAULT 0 CHECK(crashes >= 0), exclusion_window TEXT,
   ring_node TEXT REFERENCES ring_node(id));

@@ -43,6 +43,7 @@ CLAIM_TYPES = frozenset(
         "advisory_snapshot",
         "advisory_priorities",
         "review",
+        "crash",
     }
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
@@ -57,7 +58,18 @@ RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})
 RUN_ACTIVE_STATES = frozenset({"armed", "running"})
 RUN_TERMINAL_STATES = frozenset({"drained", "aborted"})
 RING_NODE_STATES = frozenset({"active", "current", "bad", "retired"})
-DEVICE_STATES = frozenset({"attached", "needs_hand", "ready", "failed"})
+DEVICE_STATES = frozenset(
+    {
+        "attached",
+        "needs_hand",
+        "ready",
+        "failed",
+        "completed",
+        "drained",
+        "thermal_pause",
+        "budget_exhausted",
+    }
+)
 DEVICE_THERMAL_STATES = frozenset({"nominal", "serious", "critical"})
 _MISSING: Any = object()
 RING_INGEST_KINDS = frozenset({"ipsw", "oss_tarball", "webkit", "security_notes"})

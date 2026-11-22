@@ -54,6 +54,9 @@ class FakeLane:
         """Accept feeds and synthesize crashes deterministically."""
         if handle.id not in self._handles:
             return FeedResult(FeedStatus.REJECTED, "unknown handle")
+        return await self._feed_bytes(handle, data)
+
+    async def _feed_bytes(self, handle: Handle, data: bytes) -> FeedResult:
         n = next(self._feeds)
         if n % self._crash_every == 0:
             crash = CrashRef(
@@ -66,6 +69,9 @@ class FakeLane:
 
     async def collect_crashes(self, handle: Handle) -> list[CrashRef]:
         """Return crashes collected since the last reset."""
+        return await self._collect_crashes(handle)
+
+    async def _collect_crashes(self, handle: Handle) -> list[CrashRef]:
         out = [crash for crash in self._crashes if crash.id.startswith(f"crash_{handle.id}_")]
         self._crashes = [
             crash for crash in self._crashes if not crash.id.startswith(f"crash_{handle.id}_")
@@ -74,14 +80,23 @@ class FakeLane:
 
     async def thermal(self) -> Thermal:
         """Return thermal state."""
+        return await self._read_thermal()
+
+    async def _read_thermal(self) -> Thermal:
         return self._thermal
 
     async def reset(self, handle: Handle) -> None:
         """Clear fake crash state for a handle."""
+        await self._reset(handle)
+
+    async def _reset(self, handle: Handle) -> None:
         self._crashes = [
             crash for crash in self._crashes if not crash.id.startswith(f"crash_{handle.id}_")
         ]
 
     async def teardown(self) -> None:
         """Mark the fake lane torn down."""
+        await self._teardown()
+
+    async def _teardown(self) -> None:
         self._torn_down = True
