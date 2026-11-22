@@ -11,7 +11,7 @@ from typing import Any
 from ..errors import FormatFail
 
 DEFAULT_MODELS_PATH = Path(__file__).with_name("models.json")
-_SIZE_CLASS_RE = re.compile(r"^kalloc_[0-9]+$")
+_SIZE_CLASS_RE = re.compile(r"^kalloc_[1-9][0-9]*$")
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,7 @@ class AllocatorModel:
     provenance: str
     classes_kb: tuple[int, ...] = ()
     cages: tuple[str, ...] = ()
+    values: tuple[str, ...] = ()
     notes: str = ""
 
     def size_classes(self) -> tuple[str, ...]:
@@ -35,6 +36,7 @@ class AllocatorModel:
             "classes_kb": list(self.classes_kb),
             "size_classes": list(self.size_classes()),
             "cages": list(self.cages),
+            "values": list(self.values),
             "notes": self.notes,
         }
 
@@ -71,6 +73,22 @@ class AllocatorModelSet:
         """Return whether a size class is declared by any model."""
         return size_class in set(self.all_size_classes())
 
+    def is_libpas_size_class(self, size_class: str) -> bool:
+        """Return whether ``size_class`` is declared by the libpas model."""
+        return size_class in self.libpas().size_classes()
+
+    def is_known_cage(self, cage: str) -> bool:
+        """Return whether ``cage`` is declared by the Gigacage model."""
+        return cage in self.get("gigacage").cages
+
+    def is_known_isoheap(self, isoheap: str) -> bool:
+        """Return whether ``isoheap`` is declared by the IsoHeap model."""
+        return isoheap in self.get("isoheap").values
+
+    def is_known_structure_id(self, structure_id: str) -> bool:
+        """Return whether ``structure_id`` is declared by the StructureID model."""
+        return structure_id in self.get("structure_id").values
+
     def provenance_for(
         self,
         size_class: str,
@@ -81,9 +99,22 @@ class AllocatorModelSet:
         """Return provenance entries for the models a candidate relies on."""
         provenance: dict[str, str] = {}
         for model in self.models:
-            used = False
-            if model.name == "libpas_size_classes" and size_class in model.size_classes() or model.name == "gigacage" and cage and cage in model.cages or model.name == "isoheap" and isoheap or model.name == "structure_id" and structure_id:
-                used = True
+            used = (
+                model.name == "libpas_size_classes"
+                and self.is_libpas_size_class(size_class)
+            ) or (
+                model.name == "gigacage"
+                and bool(cage)
+                and cage in model.cages
+            ) or (
+                model.name == "isoheap"
+                and bool(isoheap)
+                and self.is_known_isoheap(isoheap)
+            ) or (
+                model.name == "structure_id"
+                and bool(structure_id)
+                and self.is_known_structure_id(structure_id)
+            )
             if used:
                 provenance[model.name] = model.provenance
         if not provenance:
@@ -122,6 +153,7 @@ def load_allocator_models(path: str | Path | None = None) -> AllocatorModelSet:
             raise FormatFail(f"allocator model {name!r} missing provenance")
         classes_kb = _int_tuple(item.get("classes_kb", []), f"{name}.classes_kb")
         cages = _str_tuple(item.get("cages", []), f"{name}.cages")
+        values = _str_tuple(item.get("values", []), f"{name}.values")
         notes = item.get("notes", "")
         models.append(
             AllocatorModel(
@@ -129,23 +161,49 @@ def load_allocator_models(path: str | Path | None = None) -> AllocatorModelSet:
                 provenance=provenance,
                 classes_kb=classes_kb,
                 cages=cages,
+                values=values,
                 notes=str(notes),
             )
         )
     if not models:
         raise FormatFail("allocator models must not be empty")
+    required = {"libpas_size_classes", "gigacage", "isoheap", "structure_id"}
+    missing = sorted(required - {model.name for model in models})
+    if missing:
+        raise FormatFail(f"allocator models missing required entries: {', '.join(missing)}")
+    by_name = {model.name: model for model in models}
+    libpas = by_name["libpas_size_classes"]
+    if not libpas.classes_kb:
+        raise FormatFail("libpas_size_classes.classes_kb must not be empty")
+    if libpas.classes_kb != tuple(sorted(set(libpas.classes_kb))) or len(libpas.classes_kb) != len(set(libpas.classes_kb)):
+        raise FormatFail("libpas_size_classes.classes_kb must be strictly increasing")
+    for model in models:
+        if model.name != "libpas_size_classes" and model.classes_kb:
+            raise FormatFail(f"allocator model {model.name!r} must not declare classes_kb")
+        if model.name == "gigacage" and not model.cages:
+            raise FormatFail("gigacage.cages must not be empty")
+        if model.name in {"isoheap", "structure_id"} and not model.values:
+            raise FormatFail(f"{model.name}.values must not be empty")
+        if len(model.cages) != len(set(model.cages)):
+            raise FormatFail(f"allocator model {model.name!r} has duplicate cages")
+        if len(model.values) != len(set(model.values)):
+            raise FormatFail(f"allocator model {model.name!r} has duplicate values")
     return AllocatorModelSet(format=str(fmt), models=tuple(models), source_path=str(model_path))
 
 
 def size_class_for_kb(size_kb: int, models: AllocatorModelSet) -> str:
     """Choose the smallest libpas size class that can hold ``size_kb`` KiB."""
-    if size_kb <= 0:
-        raise FormatFail("size_kb must be positive")
+    if isinstance(size_kb, bool) or not isinstance(size_kb, int) or size_kb <= 0:
+        raise FormatFail("size_kb must be a positive integer")
     classes = models.libpas().classes_kb
+    if not classes:
+        raise FormatFail("libpas size classes must not be empty")
+    if size_kb > classes[-1]:
+        raise FormatFail(f"size_kb {size_kb} exceeds largest libpas class {classes[-1]}")
     for kb in classes:
         if kb >= size_kb:
             return f"kalloc_{kb}"
-    return f"kalloc_{classes[-1]}"
+    raise FormatFail("libpas size classes must be sorted")
 
 
 def adjacent_size_classes(size_class: str, models: AllocatorModelSet) -> tuple[str, str]:

@@ -12,10 +12,12 @@
     },
     "isoheap": {
       "provenance": "https://github.com/apple-oss-distributions/xnu",
+      "values": ["per_type"],
       "notes": "Per-type isolation changes heap layout and grooming order."
     },
     "structure_id": {
       "provenance": "https://github.com/apple-oss-distributions/JavaScriptCore",
+      "values": ["transition"],
       "notes": "StructureID transitions constrain type-confusion groom windows."
     }
   }

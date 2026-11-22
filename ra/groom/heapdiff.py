@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from ..errors import DialectDefect, FormatFail
+from .allocators import AllocatorModelSet, load_allocator_models
 from .models import HeapDiff, HeapDiffExpectation, HeapObject, HeapSnapshot
 
 HEAP_DIFF_CLASS_STABLE = "heap_diff.class_stable"
@@ -51,38 +53,91 @@ def diff_heap_states(before: HeapSnapshot, after: HeapSnapshot) -> HeapDiff:
     )
 
 
+@lru_cache(maxsize=1)
+def _default_allocator_models() -> AllocatorModelSet:
+    """Return the repo allocator models, loaded once per process."""
+    return load_allocator_models()
+
+
+def _allocator_models(allocator_models: AllocatorModelSet | None) -> AllocatorModelSet:
+    if allocator_models is not None:
+        return allocator_models
+    return _default_allocator_models()
+
+
+def _allowed_size_classes(dialect: Mapping[str, Any], models: AllocatorModelSet) -> set[str]:
+    """Return dialect-declared libpas classes or raise ``DialectDefect``."""
+    validator = dialect.get("validator")
+    if validator != HEAP_DIFF_CLASS_STABLE:
+        raise DialectDefect(f"unsupported heap diff validator {validator!r}")
+    victim_class = dialect.get("victim_class")
+    if not isinstance(victim_class, str) or not models.is_libpas_size_class(victim_class):
+        raise DialectDefect(f"groom dialect has unknown victim size class {victim_class!r}")
+    pre_seed = dialect.get("pre_seed", [])
+    if not isinstance(pre_seed, list):
+        raise DialectDefect("groom dialect pre_seed must be a list")
+    allowed = {victim_class}
+    for item in pre_seed:
+        if not isinstance(item, Mapping):
+            raise DialectDefect("groom dialect pre_seed entries must be mappings")
+        pad_to_class = item.get("pad_to_class")
+        if pad_to_class is None:
+            continue
+        if not isinstance(pad_to_class, str) or not models.is_libpas_size_class(pad_to_class):
+            raise DialectDefect(f"groom dialect has unknown pad size class {pad_to_class!r}")
+        allowed.add(pad_to_class)
+    return allowed
+
+
+def _heap_state_reasons(
+    diff: HeapDiff,
+    allowed_classes: set[str],
+    models: AllocatorModelSet,
+) -> list[str]:
+    """Check changed heap objects against allocator-model invariants."""
+    reasons: list[str] = []
+    changed = (*diff.added, *diff.removed)
+    for obj in changed:
+        if obj.size_class not in allowed_classes or not models.is_libpas_size_class(obj.size_class):
+            reasons.append(
+                f"heap object escaped declared size classes: {obj.size_class} not in {sorted(allowed_classes)}"
+            )
+            break
+    for obj in changed:
+        if obj.cage and not models.is_known_cage(obj.cage):
+            reasons.append(f"heap object used unknown Gigacage {obj.cage!r}")
+            break
+    for obj in changed:
+        if obj.isoheap and not models.is_known_isoheap(obj.isoheap):
+            reasons.append(f"heap object used unknown IsoHeap {obj.isoheap!r}")
+            break
+    for obj in changed:
+        if obj.structure_id and not models.is_known_structure_id(obj.structure_id):
+            reasons.append(f"heap object used unknown StructureID {obj.structure_id!r}")
+            break
+    return reasons
+
+
 def validate_heap_diff(
     dialect: Mapping[str, Any],
     before: HeapSnapshot,
     after: HeapSnapshot,
     *,
     expectation: HeapDiffExpectation | None = None,
+    allocator_models: AllocatorModelSet | None = None,
 ) -> HeapDiffResult:
     """Validate ``heap_diff.class_stable`` against exact heap-state diffs."""
-    validator = dialect.get("validator")
-    if validator != HEAP_DIFF_CLASS_STABLE:
-        raise DialectDefect(f"unsupported heap diff validator {validator!r}")
-    victim_class = dialect.get("victim_class")
-    if not isinstance(victim_class, str) or not victim_class:
-        raise FormatFail("groom dialect missing victim_class")
-    pre_seed = dialect.get("pre_seed", [])
-    allowed_classes = {victim_class}
-    if isinstance(pre_seed, list):
-        for item in pre_seed:
-            if isinstance(item, Mapping):
-                pad_to_class = item.get("pad_to_class")
-                if isinstance(pad_to_class, str) and pad_to_class:
-                    allowed_classes.add(pad_to_class)
+    if not isinstance(dialect, Mapping):
+        raise DialectDefect("groom dialect must be a mapping")
+    if not isinstance(before, HeapSnapshot) or not isinstance(after, HeapSnapshot):
+        raise FormatFail("heap snapshots must be HeapSnapshot values")
+    models = _allocator_models(allocator_models)
+    allowed_classes = _allowed_size_classes(dialect, models)
     diff = diff_heap_states(before, after)
     reasons: list[str] = []
     if expectation is not None and not expectation.matches(diff):
         reasons.append("heap diff does not match expected before/after delta")
-    for obj in (*diff.added, *diff.removed):
-        if obj.size_class not in allowed_classes:
-            reasons.append(
-                f"heap object escaped declared size classes: {obj.size_class} not in {sorted(allowed_classes)}"
-            )
-            break
+    reasons.extend(_heap_state_reasons(diff, allowed_classes, models))
     if not reasons and diff.is_empty:
         reasons.append("heap state did not change")
     return HeapDiffResult(

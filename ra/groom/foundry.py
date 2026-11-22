@@ -9,11 +9,15 @@ from ..errors import DialectDefect as RaDialectDefect
 from ..foundry.dialect import validate_dialect
 from ..foundry.errors import DialectDefect as FoundryDialectDefect
 from ..ledger import Ledger
+from .allocators import AllocatorModelSet, load_allocator_models
 from .models import CrashCase, GroomCandidate, canonical_json
 
 
 class FoundryDialectGate:
     """Validate groom dialects through the foundry schema/§11 rules."""
+
+    def __init__(self, allocator_models: AllocatorModelSet | None = None) -> None:
+        self._allocator_models = allocator_models
 
     def validate(self, dialect: Mapping[str, Any]) -> None:
         """Raise ``ra.errors.DialectDefect`` for invalid groom dialects."""
@@ -21,6 +25,18 @@ class FoundryDialectGate:
             validate_dialect(dict(dialect))
         except FoundryDialectDefect as exc:
             raise RaDialectDefect(str(exc)) from exc
+        models = self._allocator_models or load_allocator_models()
+        victim_class = dialect.get("victim_class")
+        if not models.is_libpas_size_class(str(victim_class)):
+            raise RaDialectDefect(f"unknown libpas victim size class {victim_class!r}")
+        pre_seed = dialect.get("pre_seed", [])
+        if isinstance(pre_seed, list):
+            for item in pre_seed:
+                if not isinstance(item, Mapping):
+                    continue
+                pad_to_class = item.get("pad_to_class")
+                if pad_to_class is not None and not models.is_libpas_size_class(str(pad_to_class)):
+                    raise RaDialectDefect(f"unknown libpas pad size class {pad_to_class!r}")
 
 
 class LedgerFoundryDefectSink:

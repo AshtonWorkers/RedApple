@@ -74,6 +74,7 @@ class GroomService:
             gate=gate,
             defect_sink=defect_sink,
             advisor=advisor,
+            allocator_models=models,
         )
         return cls(ledger, planner, ladder)
 

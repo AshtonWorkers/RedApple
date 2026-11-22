@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from ..errors import DialectDefect
+from ..errors import DialectDefect, FormatFail
 from ..ledger import Ledger
+from .allocators import AllocatorModelSet
 from .foundry import FoundryDialectGate, LedgerFoundryDefectSink
 from .heapdiff import validate_heap_diff
 from .interfaces import (
@@ -45,11 +46,15 @@ class LadderRunner:
         gate: FoundryDialectValidator | None = None,
         defect_sink: FoundryDefectSink | None = None,
         advisor: PressAdvisor | None = None,
+        allocator_models: AllocatorModelSet | None = None,
     ) -> None:
         self._ledger = ledger
         self._attempt_port = attempt_port or NullAttemptPort()
         self._triage = triage or StaticTriage()
-        self._gate = gate or FoundryDialectGate()
+        self._allocator_models = allocator_models
+        self._gate = gate or (
+            FoundryDialectGate(allocator_models) if allocator_models is not None else FoundryDialectGate()
+        )
         self._defect_sink = defect_sink or LedgerFoundryDefectSink(ledger)
         self._advisor = advisor or NullPressAdvisor()
 
@@ -61,7 +66,15 @@ class LadderRunner:
         triage: TriageResult | None = None,
     ) -> LadderOutcome:
         """Attempt every ladder rung once and persist the outcome."""
+        if not isinstance(case, CrashCase):
+            raise ValueError("case must be a CrashCase")
+        if plan is not None and not isinstance(plan, GroomPlan):
+            raise ValueError("plan must be a GroomPlan or None")
+        if triage is not None and not isinstance(triage, TriageResult):
+            raise ValueError("triage must be a TriageResult")
         result = triage if triage is not None else await self._triage.classify(case)
+        if not isinstance(result, TriageResult):
+            raise ValueError("triage service must return a TriageResult")
         candidates = () if plan is None else plan.candidates
         results: list[RungResult] = []
         for index, rung in enumerate(LADDER_ORDER):
@@ -136,6 +149,16 @@ class LadderRunner:
                 assertion=assertion,
                 reason=f"attempt_error:{type(exc).__name__}",
             )
+        if not isinstance(evidence, AttemptEvidence):
+            return RungResult(
+                rung=rung,
+                candidate_id=candidate.candidate_id,
+                passed=False,
+                promoted=False,
+                consecutive_passes=0,
+                assertion=assertion,
+                reason="invalid_evidence",
+            )
         passed, reason = self._evaluate(evidence, rung, candidate)
         promoted = passed and evidence.consecutive_passes >= PROMOTION_CONSECUTIVE_PASSES
         if promoted:
@@ -174,16 +197,18 @@ class LadderRunner:
         ):
             return False, "heap_evidence_missing"
         if evidence.heap_before is not None and evidence.heap_after is not None:
-            heap_result = validate_heap_diff(
-                candidate.dialect,
-                evidence.heap_before,
-                evidence.heap_after,
-                expectation=evidence.heap_expectation,
-            )
+            try:
+                heap_result = validate_heap_diff(
+                    candidate.dialect,
+                    evidence.heap_before,
+                    evidence.heap_after,
+                    expectation=evidence.heap_expectation,
+                    allocator_models=self._allocator_models,
+                )
+            except (DialectDefect, FormatFail, ValueError) as exc:
+                return False, f"heap_diff_error:{type(exc).__name__}"
             if not heap_result.passed:
                 return False, "heap_diff_failed"
-        elif evidence.heap_expectation is not None:
-            return False, "heap_evidence_missing"
         else:
             return False, "heap_evidence_missing"
         return True, "passed"
@@ -211,8 +236,11 @@ class LadderRunner:
         case: CrashCase,
         triage: TriageResult,
     ) -> GroomCandidate | None:
-        advice = await self._advisor.advise_rung(case=case, triage=triage, rung=rung)
-        if advice is None:
+        try:
+            advice = await self._advisor.advise_rung(case=case, triage=triage, rung=rung)
+        except Exception:
+            return None
+        if not isinstance(advice, str) or not advice:
             return None
         for candidate in candidates:
             if candidate.candidate_id == advice:

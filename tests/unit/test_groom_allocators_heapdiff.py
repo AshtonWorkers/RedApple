@@ -35,7 +35,8 @@ def test_RA_GRM_001_allocator_models_have_provenance() -> None:
     assert not models.is_known_size_class("kalloc_999")
     assert size_class_for_kb(1, models) == "kalloc_16"
     assert size_class_for_kb(17, models) == "kalloc_32"
-    assert size_class_for_kb(5000, models) == "kalloc_4096"
+    with pytest.raises(FormatFail):
+        size_class_for_kb(5000, models)
     assert adjacent_size_classes("kalloc_1024", models) == ("kalloc_512", "kalloc_2048")
     assert adjacent_size_classes("kalloc_16", models) == ("kalloc_16", "kalloc_32")
     assert adjacent_size_classes("kalloc_4096", models) == ("kalloc_2048", "kalloc_4096")
@@ -134,7 +135,7 @@ def test_RA_GRM_002_heap_diff_rejects_escape_empty_and_bad_validator() -> None:
     assert "heap state did not change" in empty.reasons[0]
     with pytest.raises(DialectDefect):
         validate_heap_diff({"validator": "heap_diff.other"}, before, after)
-    with pytest.raises(FormatFail):
+    with pytest.raises(DialectDefect):
         validate_heap_diff({"validator": "heap_diff.class_stable"}, before, after)
     mismatched = HeapDiffExpectation(removed=(escaped,))
     result = validate_heap_diff(dialect, before, after, expectation=mismatched)

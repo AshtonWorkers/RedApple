@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -15,7 +16,7 @@ MAX_GROOM_DEPTH = 3
 MAX_GROOM_CANDIDATES = 64
 PROMOTION_CONSECUTIVE_PASSES = 3
 
-_SIZE_CLASS_RE = re.compile(r"^kalloc_[0-9]+$")
+_SIZE_CLASS_RE = re.compile(r"^kalloc_[1-9][0-9]*$")
 
 
 class LadderRung(StrEnum):
@@ -73,6 +74,25 @@ class CrashCase:
     created_ms: int = field(default_factory=now_ms)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("crash id must be a non-empty string")
+        for name in ("target", "ring_node", "bug_class", "primitive_hint", "format", "run_id"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{name} must be a string or None")
+        if not isinstance(self.payload, bytes):
+            raise ValueError("payload must be bytes")
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("metadata must be a mapping")
+        if (
+            isinstance(self.created_ms, bool)
+            or not isinstance(self.created_ms, int)
+            or self.created_ms < 0
+        ):
+            raise ValueError("created_ms must be a non-negative integer")
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> CrashCase:
         """Build a case from a lane/triage-shaped mapping without lane imports."""
@@ -126,6 +146,33 @@ class TriageResult:
     rationale: str = ""
     artifacts: tuple[bytes, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.bug_class, str) or not self.bug_class:
+            raise ValueError("bug_class must be a non-empty string")
+        if self.primitive_hint is not None and (
+            not isinstance(self.primitive_hint, str) or not self.primitive_hint
+        ):
+            raise ValueError("primitive_hint must be a non-empty string or None")
+        if (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not math.isfinite(float(self.confidence))
+            or not 0.0 <= float(self.confidence) <= 1.0
+        ):
+            raise ValueError("confidence must be a finite number in [0, 1]")
+        if not isinstance(self.rationale, str):
+            raise ValueError("rationale must be a string")
+        if isinstance(self.artifacts, (bytes, bytearray)):
+            raise ValueError("artifacts must be a tuple of bytes")
+        try:
+            artifacts = tuple(self.artifacts)
+        except TypeError as exc:
+            raise ValueError("artifacts must be a tuple of bytes") from exc
+        if any(not isinstance(item, bytes) for item in artifacts):
+            raise ValueError("artifacts must contain only bytes")
+        object.__setattr__(self, "confidence", float(self.confidence))
+        object.__setattr__(self, "artifacts", artifacts)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "bug_class": self.bug_class,
@@ -150,6 +197,14 @@ class HeapObject:
     def __post_init__(self) -> None:
         if _SIZE_CLASS_RE.match(self.size_class) is None:
             raise ValueError(f"invalid size class {self.size_class!r}")
+        for name in ("cage", "isoheap", "structure_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string")
+        if not isinstance(self.role, str) or not self.role:
+            raise ValueError("role must be a non-empty string")
+        if not isinstance(self.state, str) or not self.state:
+            raise ValueError("state must be a non-empty string")
 
     def key(self) -> tuple[str, str, str, str, str, str]:
         """Canonical identity used by exact heap diffs."""
@@ -180,6 +235,11 @@ class HeapSnapshot:
     label: str
     objects: tuple[HeapObject, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.label, str) or not self.label:
+            raise ValueError("heap snapshot label must be a non-empty string")
+        object.__setattr__(self, "objects", _heap_object_tuple(self.objects, "heap snapshot"))
+
     @classmethod
     def from_objects(cls, label: str, objects: tuple[HeapObject, ...]) -> HeapSnapshot:
         """Create a snapshot with deterministic object ordering."""
@@ -205,6 +265,10 @@ class HeapDiff:
     added: tuple[HeapObject, ...] = ()
     removed: tuple[HeapObject, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "added", _heap_object_tuple(self.added, "heap diff added"))
+        object.__setattr__(self, "removed", _heap_object_tuple(self.removed, "heap diff removed"))
+
     @property
     def is_empty(self) -> bool:
         return not self.added and not self.removed
@@ -222,6 +286,10 @@ class HeapDiffExpectation:
 
     added: tuple[HeapObject, ...] = ()
     removed: tuple[HeapObject, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "added", _heap_object_tuple(self.added, "heap expectation added"))
+        object.__setattr__(self, "removed", _heap_object_tuple(self.removed, "heap expectation removed"))
 
     def matches(self, diff: HeapDiff) -> bool:
         return diff.added == self.added and diff.removed == self.removed
@@ -244,6 +312,36 @@ class GroomCandidate:
     structure_id: str = ""
     provenance: Mapping[str, str] = field(default_factory=dict)
     rationale: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate_id, str) or not self.candidate_id:
+            raise ValueError("candidate_id must be a non-empty string")
+        if (
+            isinstance(self.depth, bool)
+            or not isinstance(self.depth, int)
+            or not 0 <= self.depth <= MAX_GROOM_DEPTH
+        ):
+            raise ValueError(f"depth must be an integer in [0, {MAX_GROOM_DEPTH}]")
+        if (
+            isinstance(self.score, bool)
+            or not isinstance(self.score, (int, float))
+            or not math.isfinite(float(self.score))
+        ):
+            raise ValueError("score must be a finite number")
+        if not isinstance(self.dialect, Mapping):
+            raise ValueError("dialect must be a mapping")
+        if _SIZE_CLASS_RE.match(self.size_class) is None:
+            raise ValueError(f"invalid size class {self.size_class!r}")
+        for name in ("cage", "isoheap", "structure_id", "rationale"):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f"{name} must be a string")
+        if not isinstance(self.provenance, Mapping):
+            raise ValueError("provenance must be a mapping")
+        provenance = dict(self.provenance)
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in provenance.items()):
+            raise ValueError("provenance must map strings to strings")
+        object.__setattr__(self, "score", float(self.score))
+        object.__setattr__(self, "provenance", provenance)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -270,6 +368,39 @@ class GroomPlan:
     created_ms: int = field(default_factory=now_ms)
     stats: Mapping[str, int] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan_id, str) or not self.plan_id:
+            raise ValueError("plan_id must be a non-empty string")
+        if not isinstance(self.crash_id, str) or not self.crash_id:
+            raise ValueError("crash_id must be a non-empty string")
+        if isinstance(self.candidates, (bytes, bytearray)):
+            raise ValueError("candidates must be a tuple of GroomCandidate")
+        try:
+            candidates = tuple(self.candidates)
+        except TypeError as exc:
+            raise ValueError("candidates must be a tuple of GroomCandidate") from exc
+        if any(not isinstance(candidate, GroomCandidate) for candidate in candidates):
+            raise ValueError("candidates must contain only GroomCandidate")
+        if len(candidates) > MAX_GROOM_CANDIDATES:
+            raise ValueError(f"candidate count exceeds {MAX_GROOM_CANDIDATES}")
+        if not isinstance(self.stats, Mapping):
+            raise ValueError("stats must be a mapping")
+        if any(
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            for key, value in self.stats.items()
+        ):
+            raise ValueError("stats must map strings to integers")
+        if (
+            isinstance(self.created_ms, bool)
+            or not isinstance(self.created_ms, int)
+            or self.created_ms < 0
+        ):
+            raise ValueError("created_ms must be a non-negative integer")
+        object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "stats", dict(self.stats))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "plan_id": self.plan_id,
@@ -294,6 +425,42 @@ class AttemptEvidence:
     heap_expectation: HeapDiffExpectation | None = None
     artifact_payload: bytes = b""
     details: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        try:
+            rung = LadderRung(self.rung)
+        except ValueError as exc:
+            raise ValueError(f"invalid ladder rung {self.rung!r}") from exc
+        object.__setattr__(self, "rung", rung)
+        if not isinstance(self.passed, bool):
+            raise ValueError("passed must be a bool")
+        if (
+            isinstance(self.consecutive_passes, bool)
+            or not isinstance(self.consecutive_passes, int)
+            or self.consecutive_passes < 0
+        ):
+            raise ValueError("consecutive_passes must be a non-negative integer")
+        if not isinstance(self.assertion, str):
+            raise ValueError("assertion must be a string")
+        if not isinstance(self.assertion_results, Mapping):
+            raise ValueError("assertion_results must be a mapping")
+        results = dict(self.assertion_results)
+        if any(not isinstance(key, str) or not isinstance(value, bool) for key, value in results.items()):
+            raise ValueError("assertion_results must map strings to bools")
+        if self.heap_before is not None and not isinstance(self.heap_before, HeapSnapshot):
+            raise ValueError("heap_before must be a HeapSnapshot or None")
+        if self.heap_after is not None and not isinstance(self.heap_after, HeapSnapshot):
+            raise ValueError("heap_after must be a HeapSnapshot or None")
+        if self.heap_expectation is not None and not isinstance(
+            self.heap_expectation, HeapDiffExpectation
+        ):
+            raise ValueError("heap_expectation must be a HeapDiffExpectation or None")
+        if not isinstance(self.artifact_payload, bytes):
+            raise ValueError("artifact_payload must be bytes")
+        if not isinstance(self.details, Mapping):
+            raise ValueError("details must be a mapping")
+        object.__setattr__(self, "assertion_results", results)
+        object.__setattr__(self, "details", dict(self.details))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -395,6 +562,18 @@ class LadderOutcome:
             ),
             "results": [result.to_dict() for result in self.results],
         }
+
+
+def _heap_object_tuple(value: Any, label: str) -> tuple[HeapObject, ...]:
+    if isinstance(value, (bytes, bytearray)):
+        raise ValueError(f"{label} must contain HeapObject values")
+    try:
+        items = tuple(value)
+    except TypeError as exc:
+        raise ValueError(f"{label} must contain HeapObject values") from exc
+    if any(not isinstance(item, HeapObject) for item in items):
+        raise ValueError(f"{label} must contain only HeapObject")
+    return tuple(sorted(items, key=HeapObject.key))
 
 
 def _opt_str(value: Any) -> str | None:

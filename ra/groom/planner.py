@@ -34,8 +34,6 @@ from .models import (
 from .stubs import NullPressAdvisor, StaticTriage
 
 BEAM_WIDTH = 16
-ISOHEAP_PER_TYPE = "per_type"
-STRUCTURE_TRANSITION = "transition"
 
 
 @dataclass(frozen=True)
@@ -69,7 +67,7 @@ class GroomPlanner:
         self._ledger = ledger
         self._models = models or load_allocator_models()
         self._triage = triage or StaticTriage()
-        self._gate = gate or FoundryDialectGate()
+        self._gate = gate or FoundryDialectGate(self._models)
         self._defect_sink = defect_sink or LedgerFoundryDefectSink(ledger)
         self._advisor = advisor or NullPressAdvisor()
 
@@ -80,8 +78,19 @@ class GroomPlanner:
         triage: TriageResult | None = None,
     ) -> GroomPlanOutcome:
         """Classify, search, validate, and ledger-persist groom candidates."""
+        if not isinstance(case, CrashCase):
+            raise ValueError("case must be a CrashCase")
+        if triage is not None and not isinstance(triage, TriageResult):
+            raise ValueError("triage must be a TriageResult")
         result = triage if triage is not None else await self._triage.classify(case)
-        advice = await self._advisor.advise_groom(case=case, triage=result)
+        if not isinstance(result, TriageResult):
+            raise ValueError("triage service must return a TriageResult")
+        try:
+            advice = await self._advisor.advise_groom(case=case, triage=result)
+        except Exception:
+            advice = None
+        if not isinstance(advice, Mapping):
+            advice = None
         nodes, stats = self._search(case, result, advice)
         candidates: list[GroomCandidate] = []
         defects: list[str] = []
@@ -195,17 +204,17 @@ class GroomPlanner:
             prev_class, next_class = adjacent_size_classes(node.size_class, self._models)
         except Exception:
             prev_class = next_class = node.size_class
-        for size_class in {prev_class, next_class}:
+        for size_class in tuple(dict.fromkeys((prev_class, next_class))):
             if size_class != node.size_class:
                 out.append(self._node(node, size_class=size_class, depth=depth, triage=triage, advice=advice))
         cages = self._cage_values()
         for cage in cages:
             if cage != node.cage:
                 out.append(self._node(node, cage=cage, depth=depth, triage=triage, advice=advice))
-        for isoheap in ("", ISOHEAP_PER_TYPE):
+        for isoheap in self._isoheap_values():
             if isoheap != node.isoheap:
                 out.append(self._node(node, isoheap=isoheap, depth=depth, triage=triage, advice=advice))
-        for structure_id in ("", STRUCTURE_TRANSITION):
+        for structure_id in self._structure_id_values():
             if structure_id != node.structure_id:
                 out.append(
                     self._node(
@@ -259,7 +268,11 @@ class GroomPlanner:
             score += 5.0
         if advice is not None:
             advice_class = advice.get("size_class")
-            if isinstance(advice_class, str) and size_class == advice_class:
+            if (
+                isinstance(advice_class, str)
+                and self._models.is_libpas_size_class(advice_class)
+                and size_class == advice_class
+            ):
                 score += 3.0
             if advice.get("prefer_cage") and cage:
                 score += 0.5
@@ -286,7 +299,7 @@ class GroomPlanner:
         if hinted is not None:
             seeds.append(hinted)
         advice_class = advice.get("size_class") if advice is not None else None
-        if isinstance(advice_class, str) and is_valid_size_class(advice_class):
+        if isinstance(advice_class, str) and self._models.is_libpas_size_class(advice_class):
             seeds.append(advice_class)
         size_kb = case.metadata.get("size_kb")
         if isinstance(size_kb, int) and not isinstance(size_kb, bool) and size_kb > 0:
@@ -296,7 +309,7 @@ class GroomPlanner:
             seeds.append(fallback)
         out: list[str] = []
         for seed in seeds:
-            if is_valid_size_class(seed) and seed not in out:
+            if self._models.is_libpas_size_class(seed) and seed not in out:
                 out.append(seed)
         if not out:
             out = list(self._models.libpas().size_classes()[:2])
@@ -308,7 +321,7 @@ class GroomPlanner:
                 continue
             text = str(value)
             for token in text.replace(",", " ").split():
-                if is_valid_size_class(token) and self._models.is_known_size_class(token):
+                if is_valid_size_class(token) and self._models.is_libpas_size_class(token):
                     return token
         return None
 
@@ -318,6 +331,20 @@ class GroomPlanner:
         except Exception:
             cages = ()
         return ("", *cages)
+
+    def _isoheap_values(self) -> tuple[str, ...]:
+        try:
+            values = self._models.get("isoheap").values
+        except Exception:
+            values = ()
+        return tuple(dict.fromkeys(("", *values)))
+
+    def _structure_id_values(self) -> tuple[str, ...]:
+        try:
+            values = self._models.get("structure_id").values
+        except Exception:
+            values = ()
+        return tuple(dict.fromkeys(("", *values)))
 
     def _candidate(self, node: _SearchNode, case: CrashCase) -> GroomCandidate:
         size_class = node.size_class
