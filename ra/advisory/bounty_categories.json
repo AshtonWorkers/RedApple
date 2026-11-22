@@ -1,0 +1,697 @@
+{
+  "source": "https://security.apple.com/bounty/categories/",
+  "fetched_at": "2026-11-21T17:57:12.966814+00:00",
+  "categories": [
+    {
+      "id": "category-0",
+      "program": "Products",
+      "entry_point": "Network attack with no user interaction",
+      "end_point": "Kernel",
+      "max_reward": 2000000,
+      "description": "A qualifying submission starts with an identifier associated with a device, such as a phone number or an email address, and obtains a level of kernel control over the device without requiring any user interaction.",
+      "tiers": [
+        {
+          "reward": 2000000,
+          "description": "Unsigned code execution with arbitrary entitlements. As an example, an attack delivered via RCS that escapes the BlastDoor sandbox, escalates privileges to kernel, and bypasses SPTM to ultimately execute unsigned code with arbitrary entitlements.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-no-user-interaction"
+        },
+        {
+          "reward": 1350000,
+          "description": "Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-no-user-interaction"
+        },
+        {
+          "reward": 550000,
+          "description": "Kernel register control. An attack, which ultimately achieves control of a general-purpose register in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-no-user-interaction"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$2,000,000:** Unsigned code execution with arbitrary entitlements. As an example, an attack delivered via RCS that escapes the BlastDoor sandbox, escalates privileges to kernel, and bypasses SPTM to ultimately execute unsigned code with arbitrary entitlements.\n-  ⚑ **$1,350,000:** Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.\n-  ⚑ **$550,000:** Kernel register control. An attack, which ultimately achieves control of a general-purpose register in kernel space, demonstrated using the relevant Commpage Target Flag."
+    },
+    {
+      "id": "category-1",
+      "program": "Products",
+      "entry_point": "Network attack with no user interaction",
+      "end_point": "User space",
+      "max_reward": 350000,
+      "description": "A qualifying submission starts with an identifier associated with a device, such as a phone number or an email address, and obtains a level of user space control over the device without requiring any user interaction.",
+      "tiers": [
+        {
+          "reward": 350000,
+          "description": "Code execution in a privileged process. As an example, by sending a message to the phone number associated with a device, you escape or sidestep the BlastDoor sandbox and obtain code execution in a privileged user space process, demonstrated by setting the PC to the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-no-user-interaction"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": true,
+      "examples_text": "-  ⚑ **$350,000:** Code execution in a privileged process. As an example, by sending a message to the phone number associated with a device, you escape or sidestep the BlastDoor sandbox and obtain code execution in a privileged user space process, demonstrated by setting the PC to the relevant Commpage Target Flag."
+    },
+    {
+      "id": "category-2",
+      "program": "Products",
+      "entry_point": "Network attack with user interaction",
+      "end_point": "Kernel",
+      "max_reward": 1000000,
+      "description": "A qualifying submission starts with an identifier associated with a device, such as a phone number or an email address, and after interaction from the user, obtains a level of kernel control over the device.",
+      "tiers": [
+        {
+          "reward": 1000000,
+          "description": "Unsigned code execution with arbitrary entitlements. As an example, clicking Accept on a Calendar invite on the target device allows you to gain unsigned code execution with arbitrary entitlements. ",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-user-interaction"
+        },
+        {
+          "reward": 650000,
+          "description": "Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-user-interaction"
+        },
+        {
+          "reward": 275000,
+          "description": "Kernel register control. An attack which ultimately achieves control of a general-purpose register in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#network-attack-with-user-interaction"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$1,000,000:** Unsigned code execution with arbitrary entitlements. As an example, clicking Accept on a Calendar invite on the target device allows you to gain unsigned code execution with arbitrary entitlements. \n-  ⚑ **$650,000:** Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.\n-  ⚑ **$275,000:** Kernel register control. An attack which ultimately achieves control of a general-purpose register in kernel space, demonstrated using the relevant Commpage Target Flag."
+    },
+    {
+      "id": "category-3",
+      "program": "Products",
+      "entry_point": "Wireless proximity-based attacks targeting Apple-designed radio components",
+      "end_point": "Application processor",
+      "max_reward": 1000000,
+      "description": "A qualifying submission starts with sending malicious data to an Apple-designed device radio from physical proximity and obtains a level of control over the device’s application processor without requiring any user interaction.",
+      "tiers": [],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- The category maximum requires obtaining unsigned code execution with arbitrary entitlements in user space on the application processor. Rewards below the category maximum are available for attacks with the same entry point, but a less privileged end point on the device."
+    },
+    {
+      "id": "category-4",
+      "program": "Products",
+      "entry_point": "Unauthorized physical device access",
+      "end_point": "Access to sensitive user data",
+      "max_reward": 500000,
+      "description": "A qualifying submission starts with physical access to a locked Apple device and obtains sensitive user data from that device.",
+      "tiers": [
+        {
+          "reward": 500000,
+          "description": "Broad access to multiple classes of sensitive user data. As an example, attaching a malicious USB accessory to a locked device allows you to bypass USB Restricted Mode and extract messages and photos from the device.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unauthorized-physical-device-access"
+        },
+        {
+          "reward": 1000,
+          "description": "Limited access to one class of sensitive user data. An attack using a logic bug on the Lock Screen, which allows you to view the last note edited by the user.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unauthorized-physical-device-access"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$500,000:** Broad access to multiple classes of sensitive user data. As an example, attaching a malicious USB accessory to a locked device allows you to bypass USB Restricted Mode and extract messages and photos from the device.\n- **$1,000:** Limited access to one class of sensitive user data. An attack using a logic bug on the Lock Screen, which allows you to view the last note edited by the user."
+    },
+    {
+      "id": "category-5",
+      "program": "Products",
+      "entry_point": "App sandbox escape",
+      "end_point": "Kernel",
+      "max_reward": 500000,
+      "description": "A qualifying submission starts with running a malicious app on iPhone and obtains a privileged level of control over the device.",
+      "tiers": [
+        {
+          "reward": 500000,
+          "description": "Unsigned code execution with arbitrary entitlements. As an example, you create an iOS app that escapes the sandbox, escalates privileges to kernel, and bypasses SPTM to ultimately execute unsigned code with arbitrary entitlements.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#app-sandbox-escape"
+        },
+        {
+          "reward": 275000,
+          "description": "Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#app-sandbox-escape"
+        },
+        {
+          "reward": 125000,
+          "description": "Kernel register control. An attack which ultimately achieves control of a general-purpose register in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#app-sandbox-escape"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$500,000:** Unsigned code execution with arbitrary entitlements. As an example, you create an iOS app that escapes the sandbox, escalates privileges to kernel, and bypasses SPTM to ultimately execute unsigned code with arbitrary entitlements.\n-  ⚑ **$275,000:**  Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.\n-  ⚑ **$125,000:** Kernel register control. An attack which ultimately achieves control of a general-purpose register in kernel space, demonstrated using the relevant Commpage Target Flag."
+    },
+    {
+      "id": "category-6",
+      "program": "Products",
+      "entry_point": "App sandbox escape",
+      "end_point": "Access to sensitive user data",
+      "max_reward": 100000,
+      "description": "A qualifying submission starts with running a malicious app on iPhone and obtains sensitive user data from that device.",
+      "tiers": [
+        {
+          "reward": 100000,
+          "description": "Broad access to multiple classes of sensitive user data. As an example, you create an iOS app that escapes the sandbox and is able to access all of a device’s Photos library, Health information, and browsing history without user consent or awareness, even without escalating privileges to kernel.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#app-sandbox-escape"
+        },
+        {
+          "reward": 1000,
+          "description": "Limited access to one class of sensitive user data. An attack in which you create an iOS app that is able to access the last photo taken by the user without their consent.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#app-sandbox-escape"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$100,000:** Broad access to multiple classes of sensitive user data. As an example, you create an iOS app that escapes the sandbox and is able to access all of a device’s Photos library, Health information, and browsing history without user consent or awareness, even without escalating privileges to kernel.\n- **$1,000:** Limited access to one class of sensitive user data. An attack in which you create an iOS app that is able to access the last photo taken by the user without their consent."
+    },
+    {
+      "id": "category-7",
+      "program": "Products",
+      "entry_point": "Browser attack",
+      "end_point": "Kernel",
+      "max_reward": 1000000,
+      "description": "A qualifying submission starts by navigating to a malicious webpage in Safari and obtains a level of kernel control on the device.",
+      "tiers": [
+        {
+          "reward": 1000000,
+          "description": "Unsigned code execution with arbitrary entitlements. As an example, creating a malicious web page that ultimately allows you to gain unsigned code execution with arbitrary entitlements. ",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        },
+        {
+          "reward": 650000,
+          "description": "Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$1,000,000:** Unsigned code execution with arbitrary entitlements. As an example, creating a malicious web page that ultimately allows you to gain unsigned code execution with arbitrary entitlements. \n-  ⚑ **$650,000:** Kernel arbitrary read/write. An attack which ultimately achieves arbitrary write in kernel space, demonstrated using the relevant Commpage Target Flag."
+    },
+    {
+      "id": "category-8",
+      "program": "Products",
+      "entry_point": "Browser attack",
+      "end_point": "WebContent sandbox escape",
+      "max_reward": 300000,
+      "description": "A qualifying submission starts by navigating to a malicious webpage in Safari and obtains a privileged level of user space control on the device.",
+      "tiers": [
+        {
+          "reward": 300000,
+          "description": "WebContent sandbox escape with privileged code execution. As an example, creating a malicious web page that allows you to obtain code execution in WebContent, escape its sandbox, and ultimately set the PC to the Commpage Target Flag value in a privileged user space process. ",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        },
+        {
+          "reward": 200000,
+          "description": "WebContent sandbox escape with arbitrary read/write. An attack that allows you to ultimately write to the Commpage Target Flag address in a privileged user space process.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        },
+        {
+          "reward": 125000,
+          "description": "WebContent sandbox escape with register control. An attack that allows you to ultimately set a general-purpose register to match the Commpage Target Flag value in a privileged user space process.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": true,
+      "examples_text": "-  ⚑ **$300,000:** WebContent sandbox escape with privileged code execution. As an example, creating a malicious web page that allows you to obtain code execution in WebContent, escape its sandbox, and ultimately set the PC to the Commpage Target Flag value in a privileged user space process. \n-  ⚑ **$200,000:** WebContent sandbox escape with arbitrary read/write. An attack that allows you to ultimately write to the Commpage Target Flag address in a privileged user space process.\n-  ⚑ **$125,000:** WebContent sandbox escape with register control. An attack that allows you to ultimately set a general-purpose register to match the Commpage Target Flag value in a privileged user space process."
+    },
+    {
+      "id": "category-9",
+      "program": "Products",
+      "entry_point": "Browser attack",
+      "end_point": "Web Content code execution",
+      "max_reward": 10000,
+      "description": "A qualifying submission starts by navigating to a malicious webpage in Safari and obtains code execution within the WebContent process.",
+      "tiers": [
+        {
+          "reward": 10000,
+          "description": "WebContent code execution. As an example, creating a malicious web page that leads to code execution in the WebContent process, ultimately allowing you to set the PC to the user space Commpage Target Flag value.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        },
+        {
+          "reward": 5000,
+          "description": "WebContent arbitrary read/write. An attack via a malicious web page that allows you to ultimately write to the Commpage Target Flag address in WebContent. ",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        },
+        {
+          "reward": 2000,
+          "description": "WebContent arbitrary register control. An attack via a malicious web page that allows you to ultimately set a general-purpose register to match the Commpage Target Flag value in WebContent.",
+          "target_flag_required": true,
+          "source": "https://security.apple.com/bounty/categories/#browser-attack"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": true,
+      "examples_text": "-  ⚑ **$10,000:** WebContent code execution. As an example, creating a malicious web page that leads to code execution in the WebContent process, ultimately allowing you to set the PC to the user space Commpage Target Flag value.\n-  ⚑ **$5,000.** WebContent arbitrary read/write. An attack via a malicious web page that allows you to ultimately write to the Commpage Target Flag address in WebContent. \n-  ⚑ **$2,000.** WebContent arbitrary register control. An attack via a malicious web page that allows you to ultimately set a general-purpose register to match the Commpage Target Flag value in WebContent."
+    },
+    {
+      "id": "category-10",
+      "program": "Services",
+      "entry_point": "Unauthorized access to iCloud account data on Apple servers",
+      "end_point": "Access to iCloud data on Apple servers without authorization",
+      "max_reward": 1000000,
+      "description": "Access to iCloud data on Apple servers without authorization",
+      "tiers": [
+        {
+          "reward": 1000000,
+          "description": "Access to all iCloud data for multiple Apple Accounts. As an example, you demonstrate a vulnerability that grants you broad access to all iCloud data, such as iCloud Drive, Photos, Calendar, and encryption keys, for arbitrary Apple Accounts that are using all of our most advanced data protections (including two-factor authentication, Lockdown Mode, and Advanced Data Protection enabled, and \"Access to iCloud Data on the Web\" disabled).",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unauthorized-access-to-icloud-account-data-on-apple-servers"
+        },
+        {
+          "reward": 250000,
+          "description": "Apple Account takeover that bypasses two-factor authentication. As an example, you demonstrate a vulnerability in the sign-in flow that achieves complete compromise of multiple Apple Accounts configured with two-factor authentication enabled, to access all iCloud Drive contents, Photos, and encryption keys. The attack also requires no user interaction or social engineering.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unauthorized-access-to-icloud-account-data-on-apple-servers"
+        },
+        {
+          "reward": 10000,
+          "description": "Limited unauthorized access of Apple Account iCloud data. As an example, you demonstrate a vulnerability that lets you access a subset of iCloud account features, such as iCloud Photos, on accounts you do not control.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unauthorized-access-to-icloud-account-data-on-apple-servers"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$1,000,000:** Access to all iCloud data for multiple Apple Accounts. As an example, you demonstrate a vulnerability that grants you broad access to all iCloud data, such as iCloud Drive, Photos, Calendar, and encryption keys, for arbitrary Apple Accounts that are using all of our most advanced data protections (including two-factor authentication, Lockdown Mode, and Advanced Data Protection enabled, and \"Access to iCloud Data on the Web\" disabled).\n- **$250,000:** Apple Account takeover that bypasses two-factor authentication. As an example, you demonstrate a vulnerability in the sign-in flow that achieves complete compromise of multiple Apple Accounts configured with two-factor authentication enabled, to access all iCloud Drive contents, Photos, and encryption keys. The attack also requires no user interaction or social engineering.\n- **$10,000:** Limited unauthorized access of Apple Account iCloud data. As an example, you demonstrate a vulnerability that lets you access a subset of iCloud account features, such as iCloud Photos, on accounts you do not control."
+    },
+    {
+      "id": "category-11",
+      "program": "Services",
+      "entry_point": "Remote Code Execution",
+      "end_point": "Command injection, deserialization bugs, XXE leading to RCE",
+      "max_reward": 100000,
+      "description": "Command injection, deserialization bugs, XXE leading to RCE",
+      "tiers": [
+        {
+          "reward": 100000,
+          "description": "Full command injection leading to complete compromise of the affected system. As an example, you are able to remotely execute code, which leads to the full compromise of the affected host and runs as an elevated-privilege user account on a common production Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#remote-code-execution"
+        },
+        {
+          "reward": 10000,
+          "description": "Execution of arbitrary commands on the system as a low-privilege user. As an example, you are able to remotely execute arbitrary commands on a common production system as a low-privilege user.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#remote-code-execution"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$100,000:** Full command injection leading to complete compromise of the affected system. As an example, you are able to remotely execute code, which leads to the full compromise of the affected host and runs as an elevated-privilege user account on a common production Apple web service.\n- **$10,000:** Execution of arbitrary commands on the system as a low-privilege user. As an example, you are able to remotely execute arbitrary commands on a common production system as a low-privilege user."
+    },
+    {
+      "id": "category-12",
+      "program": "Services",
+      "entry_point": "Unrestricted file system or database access",
+      "end_point": "Unsandboxed XXE, SQL injection",
+      "max_reward": 50000,
+      "description": "Unsandboxed XXE, SQL injection",
+      "tiers": [
+        {
+          "reward": 50000,
+          "description": "SQL injection that discloses large amounts of sensitive information. As an example, you demonstrate an SQL-injection vulnerability that discloses sensitive information on a common production Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unrestricted-file-system-or-database-access"
+        },
+        {
+          "reward": 10000,
+          "description": "SQL injection that discloses non-sensitive information. As an example, you demonstrate an SQL-injection vulnerability that discloses non-sensitive information on a common production Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unrestricted-file-system-or-database-access"
+        },
+        {
+          "reward": 5000,
+          "description": "Blind SQL injection that doesn't directly disclose information. As an example, you demonstrate a time-based blind SQL-injection vulnerability that could infer the existence of data, but not directly read it, on a common production Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#unrestricted-file-system-or-database-access"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$50,000:** SQL injection that discloses large amounts of sensitive information. As an example, you demonstrate an SQL-injection vulnerability that discloses sensitive information on a common production Apple web service.\n- **$10,000:** SQL injection that discloses non-sensitive information. As an example, you demonstrate an SQL-injection vulnerability that discloses non-sensitive information on a common production Apple web service.\n- **$5,000:** Blind SQL injection that doesn't directly disclose information. As an example, you demonstrate a time-based blind SQL-injection vulnerability that could infer the existence of data, but not directly read it, on a common production Apple web service."
+    },
+    {
+      "id": "category-13",
+      "program": "Services",
+      "entry_point": "Logic flaw bugs leaking or bypassing significant security controls",
+      "end_point": "Direct object reference, remote user impersonation, account takeover, privilege escalation, IDOR, SSRF, directory traversal, HTTP-request smuggling, proxy misconfiguration leading to bypass of security controls",
+      "max_reward": 50000,
+      "description": "Direct object reference, remote user impersonation, account takeover, privilege escalation, IDOR, SSRF, directory traversal, HTTP-request smuggling, proxy misconfiguration leading to bypass of security controls",
+      "tiers": [
+        {
+          "reward": 50000,
+          "description": "Privilege escalation that allows broad access to user data and/or performs administrative functions. As an example, you demonstrate privilege escalation that allows broad access to user data and the ability to perform administrative functions on a common production Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#logic-flaw-bugs-leaking-or-bypassing-significant-security-controls"
+        },
+        {
+          "reward": 20000,
+          "description": "A full response SSRF vulnerability with the ability to modify the request URL, parameters, and methods. As an example, you are able to probe internal production Apple systems.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#logic-flaw-bugs-leaking-or-bypassing-significant-security-controls"
+        },
+        {
+          "reward": 10000,
+          "description": "IDOR that allows you access to sensitive information or configuration manipulation",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#logic-flaw-bugs-leaking-or-bypassing-significant-security-controls"
+        },
+        {
+          "reward": 5000,
+          "description": "Directory traversal with sensitive data exposed. As an example, you demonstrate a directory traversal with sensitive data exposed on a common, publicly accessed Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#logic-flaw-bugs-leaking-or-bypassing-significant-security-controls"
+        },
+        {
+          "reward": 2500,
+          "description": "IDOR with limited information disclosure. As an example, you demonstrate a direct object-reference vulnerability that allows access to a user's non-sensitive metadata on a publicly accessed Apple web service.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#logic-flaw-bugs-leaking-or-bypassing-significant-security-controls"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$50,000:** Privilege escalation that allows broad access to user data and/or performs administrative functions. As an example, you demonstrate privilege escalation that allows broad access to user data and the ability to perform administrative functions on a common production Apple web service.\n- **$20,000:** A full response SSRF vulnerability with the ability to modify the request URL, parameters, and methods. As an example, you are able to probe internal production Apple systems.\n- **$10,000:** IDOR that allows you access to sensitive information or configuration manipulation\n- **$5,000:** Directory traversal with sensitive data exposed. As an example, you demonstrate a directory traversal with sensitive data exposed on a common, publicly accessed Apple web service.\n- **$2,500:** IDOR with limited information disclosure. As an example, you demonstrate a direct object-reference vulnerability that allows access to a user's non-sensitive metadata on a publicly accessed Apple web service."
+    },
+    {
+      "id": "category-14",
+      "program": "Services",
+      "entry_point": "Code execution on the client/server",
+      "end_point": "XSS, CSRF, HTML injection or having write-access authorization when prohibited",
+      "max_reward": 40000,
+      "description": "XSS, CSRF, HTML injection or having write-access authorization when prohibited",
+      "tiers": [
+        {
+          "reward": 40000,
+          "description": "Persistent XSS, which if executed would disclose a large amount of PII or sensitive information.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#code-execution-on-the-client/server"
+        },
+        {
+          "reward": 10000,
+          "description": "Blind XSS vulnerability executing on internal Apple services. As an example, you demonstrate a blind XSS vulnerability executing on internal Apple services, where sensitive information can be derived from the XSS payload.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#code-execution-on-the-client/server"
+        },
+        {
+          "reward": 5000,
+          "description": "XSS or HTML injection with a demonstrated account-takeover exploit or other significant impact.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#code-execution-on-the-client/server"
+        },
+        {
+          "reward": 2500,
+          "description": "CSRF vulnerability with PoC showing unwanted user action. As an example, you demonstrate a CSRF vulnerability with a proof of concept that shows unwanted user action, such as changing the user’s account email.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#code-execution-on-the-client/server"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$40,000:** Persistent XSS, which if executed would disclose a large amount of PII or sensitive information.\n- - **$10,000:** Blind XSS vulnerability executing on internal Apple services. As an example, you demonstrate a blind XSS vulnerability executing on internal Apple services, where sensitive information can be derived from the XSS payload.\n- **$5,000:** XSS or HTML injection with a demonstrated account-takeover exploit or other significant impact.\n- **$2,500:** CSRF vulnerability with PoC showing unwanted user action. As an example, you demonstrate a CSRF vulnerability with a proof of concept that shows unwanted user action, such as changing the user’s account email."
+    },
+    {
+      "id": "category-15",
+      "program": "Services",
+      "entry_point": "Confidential or sensitive data",
+      "end_point": "Generalized access control issues leading to exposure of PII",
+      "max_reward": 30000,
+      "description": "Generalized access control issues leading to exposure of PII",
+      "tiers": [
+        {
+          "reward": 30000,
+          "description": "Large disclosure of personally identifiable information (PII) for a customer or Apple employee. As an example, you demonstrate a vulnerability that leads to the disclosure of customer or Apple employee PII.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#confidential-or-sensitive-data"
+        },
+        {
+          "reward": 5000,
+          "description": "Apple confidential information disclosure. As an example, you demonstrate a vulnerability that leads to the disclosure of a substantial quantity of Apple confidential information that Apple would not want publicly accessible.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#confidential-or-sensitive-data"
+        },
+        {
+          "reward": 2500,
+          "description": "Apple internal information disclosure. As an example, you demonstrate a vulnerability that leads to the disclosure of a substantial quantity of internal Apple data that Apple does not want publicly accessible.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#confidential-or-sensitive-data"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$30,000:** Large disclosure of personally identifiable information (PII) for a customer or Apple employee. As an example, you demonstrate a vulnerability that leads to the disclosure of customer or Apple employee PII.\n- **$5,000:** Apple confidential information disclosure. As an example, you demonstrate a vulnerability that leads to the disclosure of a substantial quantity of Apple confidential information that Apple would not want publicly accessible.\n- **$2,500:** Apple internal information disclosure. As an example, you demonstrate a vulnerability that leads to the disclosure of a substantial quantity of internal Apple data that Apple does not want publicly accessible."
+    },
+    {
+      "id": "category-16",
+      "program": "Services",
+      "entry_point": "Domain and subdomain takeovers",
+      "end_point": "DNS zone, domain, and subdomain takeovers",
+      "max_reward": 5000,
+      "description": "DNS zone, domain, and subdomain takeovers",
+      "tiers": [
+        {
+          "reward": 5000,
+          "description": "Broad access to takeover a DNS Zone for a production property.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#domain-and-subdomain-takeovers"
+        },
+        {
+          "reward": 1000,
+          "description": "Takeover of an *.apple.com, *.icloud.com, or *.itunes.com subdomain.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#domain-and-subdomain-takeovers"
+        },
+        {
+          "reward": 500,
+          "description": "Takeover of a subdomain other than *.apple.com, *.icloud.com, or *.itunes.com.",
+          "target_flag_required": false,
+          "source": "https://security.apple.com/bounty/categories/#domain-and-subdomain-takeovers"
+        }
+      ],
+      "source": "https://security.apple.com/bounty/categories/",
+      "target_flag_required": false,
+      "examples_text": "- **$5,000:** Broad access to takeover a DNS Zone for a production property.\n- **$1,000:** Takeover of an *.apple.com, *.icloud.com, or *.itunes.com subdomain.\n- **$500:** Takeover of a subdomain other than *.apple.com, *.icloud.com, or *.itunes.com."
+    },
+    {
+      "id": "macos-gatekeeper-complete",
+      "program": "macOS",
+      "entry_point": "macOS Gatekeeper bypass",
+      "end_point": "Complete bypass of quarantine checks",
+      "max_reward": 100000,
+      "description": "Complete Safari-downloaded, quarantined app bypass requiring only standard interaction.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "macos-gatekeeper-partial",
+      "program": "macOS",
+      "entry_point": "macOS Gatekeeper bypass",
+      "end_point": "Limited-interaction or unspecified bypass",
+      "max_reward": 10000,
+      "description": "Limited interaction, including dragging an app to Applications; unclear advisory wording uses this lower ceiling.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "macos-sandbox",
+      "program": "macOS",
+      "entry_point": "macOS sandbox escape",
+      "end_point": "Sandbox escape demonstrated only against macOS",
+      "max_reward": 5000,
+      "description": "A sandbox escape that is demonstrated only against macOS.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "macos-tcc-data",
+      "program": "macOS",
+      "entry_point": "macOS TCC",
+      "end_point": "TCC-protected data without Target Flag",
+      "max_reward": 1000,
+      "description": "Obtains sensitive data protected by TCC, such as Photos, without the TCC Target Flag.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "macos-tcc-flag",
+      "program": "macOS",
+      "entry_point": "macOS TCC",
+      "end_point": "TCC Target Flag from an unsandboxed app",
+      "max_reward": 5000,
+      "description": "Capture of the TCC Target Flag from an unsandboxed app.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/"
+      ],
+      "target_flag_required": true,
+      "tiers": []
+    },
+    {
+      "id": "macos-tcc-sandbox",
+      "program": "macOS",
+      "entry_point": "macOS TCC",
+      "end_point": "TCC Target Flag with App Sandbox escape",
+      "max_reward": 10000,
+      "description": "Capture of the TCC Target Flag together with App Sandbox escape.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/"
+      ],
+      "target_flag_required": true,
+      "tiers": []
+    },
+    {
+      "id": "pcc-remote-code",
+      "program": "Private Cloud Compute",
+      "entry_point": "Remote attack on request data",
+      "end_point": "Unsigned code execution with arbitrary entitlements",
+      "max_reward": 1000000,
+      "description": "Apple PCC: Remote attack on request data; Unsigned code execution with arbitrary entitlements.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/",
+        "https://security.apple.com/blog/private-cloud-compute/",
+        "https://security.apple.com/documentation/private-cloud-compute/",
+        "https://security.apple.com/blog/pcc-security-research/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "pcc-remote-data",
+      "program": "Private Cloud Compute",
+      "entry_point": "Remote attack on request data",
+      "end_point": "Request data outside the trust boundary",
+      "max_reward": 250000,
+      "description": "Apple PCC: Remote attack on request data; Request data outside the trust boundary.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/",
+        "https://security.apple.com/blog/private-cloud-compute/",
+        "https://security.apple.com/documentation/private-cloud-compute/",
+        "https://security.apple.com/blog/pcc-security-research/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "pcc-network-data",
+      "program": "Private Cloud Compute",
+      "entry_point": "Privileged network position",
+      "end_point": "Request data outside the trust boundary",
+      "max_reward": 150000,
+      "description": "Apple PCC: Privileged network position; Request data outside the trust boundary.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/",
+        "https://security.apple.com/blog/private-cloud-compute/",
+        "https://security.apple.com/documentation/private-cloud-compute/",
+        "https://security.apple.com/blog/pcc-security-research/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "pcc-network-code",
+      "program": "Private Cloud Compute",
+      "entry_point": "Privileged network position",
+      "end_point": "Unattested code execution",
+      "max_reward": 100000,
+      "description": "Apple PCC: Privileged network position; Unattested code execution.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/",
+        "https://security.apple.com/blog/private-cloud-compute/",
+        "https://security.apple.com/documentation/private-cloud-compute/",
+        "https://security.apple.com/blog/pcc-security-research/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    },
+    {
+      "id": "pcc-config",
+      "program": "Private Cloud Compute",
+      "entry_point": "Deployment or configuration issue",
+      "end_point": "Accidental or unexpected data disclosure",
+      "max_reward": 50000,
+      "description": "Apple PCC: Deployment or configuration issue; Accidental or unexpected data disclosure.",
+      "source": "https://security.apple.com/bounty/categories/",
+      "sources": [
+        "https://security.apple.com/bounty/categories/",
+        "https://security.apple.com/blog/private-cloud-compute/",
+        "https://security.apple.com/documentation/private-cloud-compute/",
+        "https://security.apple.com/blog/pcc-security-research/"
+      ],
+      "target_flag_required": false,
+      "tiers": []
+    }
+  ],
+  "bonuses": [
+    {
+      "topic": "Beta software: issues unique to newly added features or code, including regressions",
+      "additional_percent": 50
+    },
+    {
+      "topic": "Bypass specific Lockdown Mode protections",
+      "additional_percent": 100
+    },
+    {
+      "topic": "Beta software + Lockdown Mode",
+      "additional_percent": 150
+    }
+  ],
+  "target_flags_note": "Obtaining a specific reward requires confirmation with Target Flags where indicated. Rewards depend on demonstrated outcomes; a patched CVE is not itself eligible.",
+  "notes": [
+    "Apple Security Bounty features the industry’s highest rewards for exploit chains that can achieve similar goals as sophisticated mercenary-spyware attacks. Rewards are determined by the outcomes you’re able to demonstrate with your report. Obtaining a specific reward requires confirmation with Target Flags where indicated. We provide bonus rewards for the most exceptional research, including vulnerabilities that bypass the specific protections of Lockdown Mode or are discovered in beta software."
+  ],
+  "sources": [
+    "https://security.apple.com/bounty/categories/",
+    "https://security.apple.com/blog/private-cloud-compute/",
+    "https://security.apple.com/documentation/private-cloud-compute/",
+    "https://security.apple.com/bounty/target-flags/",
+    "https://security.apple.com/blog/pcc-security-research/"
+  ],
+  "mapping_policy": "Likely category / heuristic, not eligibility. No reward is inferred from exploitation status. Missing entry-point or control evidence requires human review.",
+  "scope_notes": {
+    "App sandbox escape": "An app on iPhone; heuristic restricted to iOS/iPadOS releases with control or data outcomes.",
+    "Wireless": "Apple-designed radio and application-processor control without interaction required; keywords alone do not qualify.",
+    "Physical": "Locked device and extraction of sensitive data required.",
+    "macOS": "Only explicit sandbox/TCC/Gatekeeper outcomes have published macOS-only rows; root or kernel control alone is not assigned an invented payout."
+  }
+}

@@ -30,7 +30,7 @@ grammars = ["*.json"]
 schemas = ["*.json"]
 migrations = ["*.sql"]
 models = ["*.json"]
-ra = ["discovery/corpus/*.js"]
+ra = ["discovery/corpus/*.js", "advisory/bounty_categories.json"]
 
 [tool.setuptools.data-files]
 "." = ["redapple.toml"]
