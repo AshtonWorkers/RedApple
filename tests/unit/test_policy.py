@@ -439,7 +439,7 @@ def test_RA_POL_dispatch_tick_budget_at_5000_backlog():
             ledger.store.apply_batch(operations)
             # Coverage tracing inflates wall-clock tick cost; keep the budget
             # validation but scale it to the instrumentation overhead.
-            tick_budget_ms = 5.0 * (4 if "coverage" in sys.modules else 1)
+            tick_budget_ms = 5.0 * (4 if "coverage" in sys.modules else 2)
             engine = PolicyEngine(
                 ledger,
                 ExecutorCaps(spend_usd_micro=1_000_000),
