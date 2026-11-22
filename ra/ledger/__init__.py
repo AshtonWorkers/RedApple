@@ -702,7 +702,7 @@ class Ledger:
         )
 
     def verdicts_for_claim(self, claim_id: str) -> list[dict[str, Any]]:
-        """List review verdicts for a claim in insertion order."""
+        """List review verdicts for a claim in creation order."""
         return self.store.verdicts_for_claim(claim_id)
 
     def get_work_order(self, work_order_id: str) -> dict[str, Any] | None:

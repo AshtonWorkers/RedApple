@@ -42,6 +42,7 @@ CLAIM_TYPES = frozenset(
         "race_state",
         "advisory_snapshot",
         "advisory_priorities",
+        "review",
     }
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
@@ -1463,9 +1464,12 @@ class LedgerStore:
         return [dict(row) for row in rows]
 
     def verdicts_for_claim(self, claim_id: str) -> list[dict[str, Any]]:
-        """List review verdicts for a claim in insertion order."""
+        """List review verdicts for a claim in creation order."""
         rows = self._conn.execute(
-            "SELECT id, claim_id, reviewer, agree, reason, created FROM verdict WHERE claim_id=? ORDER BY id",
+            """
+            SELECT id, claim_id, reviewer, agree, reason, created
+            FROM verdict WHERE claim_id=? ORDER BY created, id
+            """,
             (claim_id,),
         ).fetchall()
         return [dict(row) for row in rows]

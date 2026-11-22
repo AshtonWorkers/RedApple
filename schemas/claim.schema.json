@@ -5,7 +5,7 @@
   "required": ["id", "type", "artifacts", "confidence", "state"],
   "properties": {
     "id": {"pattern": "^cl_[0-9A-HJKMNP-TV-Z]{26}$"},
-    "type": {"enum": ["bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score", "foundry_state", "advisory_snapshot", "advisory_priorities"]},
+    "type": {"enum": ["bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score", "foundry_state", "harness", "discovery_crash", "discovery_campaign", "discovery_state", "race", "race_state", "advisory_snapshot", "advisory_priorities", "review"]},
     "artifacts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"pattern": "^art_"}},
     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "state": {"enum": ["limbo", "bound", "reviewed", "promoted", "demoted", "parked"]},

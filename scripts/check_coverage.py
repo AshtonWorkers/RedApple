@@ -12,6 +12,7 @@ FLOORS = {
     "groom": 0.90,
     "joins": 0.90,
     "foundry": 0.95,
+    "reviewer": 0.90,
 }
 OVERALL_FLOOR = 0.80
 
