@@ -1,0 +1,91 @@
+"""Dupe oracle (RA-DUP): crash-signature dedup and submission scoring."""
+
+from .interfaces import (
+    CorpusIndex,
+    NullCorpusIndex,
+    NullPatchProximityProvider,
+    NullSubmissionQueue,
+    NullTriageClassifier,
+    PatchProximityProvider,
+    SubmissionQueue,
+    TriageClassifier,
+)
+from .models import (
+    CorpusEvidence,
+    CrashInput,
+    CrashSignature,
+    DupeScore,
+    DupeVerdict,
+    Finding,
+    NormalizedFrame,
+    PatchDiff,
+    SubmissionCandidate,
+    compute_dupe_score,
+)
+from .oracle import DEFAULT_DUPLICATE_THRESHOLD, DupeOracle
+from .patch import (
+    max_patch_proximity,
+    max_patch_similarity,
+    parse_unified_diff,
+    patch_proximity,
+    patch_similarity,
+)
+from .signatures import (
+    SignatureSimilarity,
+    finding_patches,
+    patch_proximity_for_finding,
+    patch_similarity_for_findings,
+    signature_for_finding,
+    signature_similarity,
+    stack_similarity,
+)
+from .store import (
+    DupeRecord,
+    DupeStore,
+    LedgerDupeStore,
+    canonical_dedup_key,
+    canonical_id_for_signature,
+)
+from .submission import candidates_from_verdicts, rank_submissions
+
+__all__ = [
+    "CorpusEvidence",
+    "CorpusIndex",
+    "CrashInput",
+    "CrashSignature",
+    "DEFAULT_DUPLICATE_THRESHOLD",
+    "DupeOracle",
+    "DupeRecord",
+    "DupeScore",
+    "DupeStore",
+    "DupeVerdict",
+    "Finding",
+    "LedgerDupeStore",
+    "NormalizedFrame",
+    "NullCorpusIndex",
+    "NullPatchProximityProvider",
+    "NullSubmissionQueue",
+    "NullTriageClassifier",
+    "PatchDiff",
+    "PatchProximityProvider",
+    "SignatureSimilarity",
+    "SubmissionCandidate",
+    "SubmissionQueue",
+    "TriageClassifier",
+    "canonical_dedup_key",
+    "canonical_id_for_signature",
+    "candidates_from_verdicts",
+    "compute_dupe_score",
+    "finding_patches",
+    "max_patch_proximity",
+    "max_patch_similarity",
+    "parse_unified_diff",
+    "patch_proximity",
+    "patch_proximity_for_finding",
+    "patch_similarity",
+    "patch_similarity_for_findings",
+    "rank_submissions",
+    "signature_for_finding",
+    "signature_similarity",
+    "stack_similarity",
+]
