@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .client import ChatResponse, DeepSeekClient, DeepSeekError, ModelClient, ReplayQueue
+from .egress import EgressGovernor
 from .golden import (
     GoldenCase,
     GoldenReport,
@@ -11,7 +12,7 @@ from .golden import (
     load_golden,
     score_output,
 )
-from .harness import ModelResult, PressHarness, validate_output
+from .harness import ModelResult, PressHarness, decode_output, validate_output
 from .packets import CompiledPacket, Packet, PacketCompiler
 from .redact import redact_text
 from .routing import (
@@ -33,6 +34,8 @@ __all__ = [
     "CompiledPacket",
     "DeepSeekClient",
     "DeepSeekError",
+    "EgressGovernor",
+    "decode_output",
     "GoldenCase",
     "GoldenReport",
     "ModelClient",

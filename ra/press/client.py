@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import random
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..errors import FormatFail, RaError
+from .egress import EgressGovernor
 from .redact import redact_text
 
 DEFAULT_ENDPOINT = "https://api.deepseek.com"
@@ -60,15 +60,21 @@ class DeepSeekClient:
         endpoint: str = DEFAULT_ENDPOINT,
         model: str = DEFAULT_MODEL,
         timeout_s: float = 90.0,
-        max_retries: int = 3,
+        max_retries: int | None = None,
+        governor: EgressGovernor | None = None,
     ) -> None:
         import os
 
+        if max_retries is not None and max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.timeout_s = timeout_s
-        self.max_retries = max_retries
+        self.governor = governor or EgressGovernor(
+            max_retries=3 if max_retries is None else max_retries
+        )
+        self.max_retries = self.governor.max_retries if max_retries is None else max_retries
         if not self.api_key:
             raise DeepSeekError("DEEPSEEK_API_KEY is not set")
 
@@ -119,7 +125,9 @@ class DeepSeekClient:
         """List models (diagnostic)."""
         request = urllib.request.Request(self.endpoint + "/models", method="GET")
         request.add_header("Authorization", "Bearer " + (self.api_key or ""))
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+        with self.governor.permit(), urllib.request.urlopen(
+            request, timeout=self.timeout_s
+        ) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def _post(self, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -130,7 +138,9 @@ class DeepSeekClient:
             request.add_header("Content-Type", "application/json")
             request.add_header("Authorization", "Bearer " + (self.api_key or ""))
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                with self.governor.permit(), urllib.request.urlopen(
+                    request, timeout=self.timeout_s
+                ) as response:
                     parsed = json.loads(response.read().decode("utf-8"))
                     if not isinstance(parsed, dict):
                         raise DeepSeekError("model response was not an object")
@@ -139,22 +149,16 @@ class DeepSeekClient:
                 detail = exc.read().decode("utf-8", "replace")[:500]
                 last = DeepSeekError(f"HTTP {exc.code}: {detail}")
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
-                    time.sleep(self._backoff(attempt))
+                    self.governor.backoff_wait(attempt)
                     continue
                 raise last from exc
             except (urllib.error.URLError, TimeoutError) as exc:
                 last = DeepSeekError(f"network error: {exc}")
                 if attempt < self.max_retries:
-                    time.sleep(self._backoff(attempt))
+                    self.governor.backoff_wait(attempt)
                     continue
                 raise last from exc
         raise DeepSeekError("model request failed") from last
-
-    @staticmethod
-    def _backoff(attempt: int) -> float:
-        # Egress governor: exponential backoff with full jitter, capped at 60s.
-        cap = min(60.0, 2.0 ** (attempt + 1))
-        return random.uniform(0.0, cap)
 
 
 class ReplayQueue:
