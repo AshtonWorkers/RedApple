@@ -96,6 +96,13 @@ class BudgetGate(RaError):
     retryable = False
 
 
+class AdapterShipBlocked(RaError):
+    """LoRA-style adapter failed the golden-set ship gate."""
+
+    code = "ADAPTER_SHIP_BLOCKED"
+    retryable = False
+
+
 class FormatFail(RaError):
     """Schema or grammar validation failure."""
 

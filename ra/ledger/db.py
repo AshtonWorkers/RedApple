@@ -17,11 +17,11 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from ..errors import DuplicateDedup, FormatFail, RaError
+from ..errors import AdapterShipBlocked, DuplicateDedup, FormatFail, RaError
 from .ids import UlidFactory  # noqa: F401  (re-exported for callers)
 from .models import ClaimInput
 from .operations import LedgerOperation
-from .schema import SCHEMA_SQL
+from .schema import MEMORY_SCHEMA_SQL, SCHEMA_SQL
 from .states import ClaimState, can_transition
 
 CLAIM_TYPES = frozenset(
@@ -33,6 +33,7 @@ CLAIM_TYPES = frozenset(
         "gadget_set",
         "root_cause",
         "dupe_score",
+        "foundry_state",
         "harness",
         "discovery_crash",
         "discovery_campaign",
@@ -201,6 +202,22 @@ _STORE_GUARDED_METHODS = frozenset(
 )
 
 
+def _json_text(payload: Mapping[str, Any], key: str) -> str:
+    value = _text(payload, key)
+    try:
+        json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise FormatFail(f"ledger payload {key} must be JSON") from exc
+    return value
+
+
+def _score(payload: Mapping[str, Any], key: str) -> float:
+    value = _float(payload, key)
+    if not 0.0 <= value <= 1.0:
+        raise FormatFail(f"ledger payload {key} must be in [0,1]")
+    return value
+
+
 class LedgerStore:
     """Synchronous SQLite store used only by the ledger actor.
 
@@ -255,6 +272,8 @@ class LedgerStore:
         ).fetchone()
         if row is None:
             self._conn.executescript(SCHEMA_SQL)
+        else:
+            self._conn.executescript(MEMORY_SCHEMA_SQL)
 
     def close(self) -> None:
         """Close the SQLite connection."""
@@ -842,6 +861,395 @@ class LedgerStore:
             )
         return len(rows)
 
+    def _op_upsert_memory_prior(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        kind = _text(payload, "kind")
+        surface = _text(payload, "surface")
+        key = _text(payload, "key")
+        value_json = _json_text(payload, "value_json")
+        score = _score(payload, "score")
+        support = _int(payload, "support")
+        confidence = _score(payload, "confidence")
+        if support < 0:
+            raise FormatFail("memory prior support must be >= 0")
+        self._conn.execute(
+            """
+            INSERT INTO memory_prior(
+              id, kind, surface, key, value_json, score, support, confidence, state,
+              revision, source_claim, source_artifact, created, updated
+            ) VALUES(?,?,?,?,?,?,?,?,'active',1,?,?,?,?)
+            ON CONFLICT(kind,surface,key) DO UPDATE SET
+              value_json=CASE
+                WHEN excluded.score >= memory_prior.score THEN excluded.value_json
+                ELSE memory_prior.value_json END,
+              score=MAX(memory_prior.score, excluded.score),
+              support=memory_prior.support + excluded.support,
+              confidence=MAX(memory_prior.confidence, excluded.confidence),
+              state='active',
+              revision=memory_prior.revision + 1,
+              source_claim=excluded.source_claim,
+              source_artifact=excluded.source_artifact,
+              updated=excluded.updated
+            """,
+            (
+                _text(payload, "prior_id"),
+                kind,
+                surface,
+                key,
+                value_json,
+                score,
+                support,
+                confidence,
+                _opt_text(payload, "source_claim"),
+                _opt_text(payload, "source_artifact"),
+                _int(payload, "created"),
+                _int(payload, "updated"),
+            ),
+        )
+        row = self._conn.execute(
+            "SELECT * FROM memory_prior WHERE kind=? AND surface=? AND key=?",
+            (kind, surface, key),
+        ).fetchone()
+        if row is None:
+            raise FormatFail("memory prior upsert did not persist")
+        return dict(row)
+
+    def _op_retire_memory_prior(self, payload: Mapping[str, Any]) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE memory_prior SET state='retired', updated=? WHERE id=?",
+            (_int(payload, "updated"), _text(payload, "prior_id")),
+        )
+        return cursor.rowcount == 1
+
+    def _op_ensure_memory_preference(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        pair_id = _text(payload, "pair_id")
+        chosen_json = _json_text(payload, "chosen_json")
+        rejected_json = _json_text(payload, "rejected_json")
+        reward = _score(payload, "reward")
+        cursor = self._conn.execute(
+            """
+            INSERT INTO memory_preference(
+              id, task_type, surface, prompt_sha, chosen_json, rejected_json, reward,
+              rationale, source_claim, source_artifact, created
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                pair_id,
+                _text(payload, "task_type"),
+                _text(payload, "surface"),
+                _text(payload, "prompt_sha"),
+                chosen_json,
+                rejected_json,
+                reward,
+                _opt_text(payload, "rationale"),
+                _opt_text(payload, "source_claim"),
+                _opt_text(payload, "source_artifact"),
+                _int(payload, "created"),
+            ),
+        )
+        row = self._conn.execute("SELECT * FROM memory_preference WHERE id=?", (pair_id,)).fetchone()
+        if row is None:
+            raise FormatFail("memory preference insert failed")
+        return {"inserted": int(cursor.rowcount), "row": dict(row)}
+
+    def _op_create_memory_adapter(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        task_type = _text(payload, "task_type")
+        surface = _text(payload, "surface")
+        config_json = _json_text(payload, "config_json")
+        pair_rows = _list(payload, "pair_ids")
+        pair_ids = [_text(row, "pair_id") for row in pair_rows]
+        train_pair_count = _int(payload, "train_pair_count")
+        if train_pair_count != len(pair_ids):
+            raise FormatFail("adapter train_pair_count must match pair_ids")
+        for pair_id in pair_ids:
+            exists = self._conn.execute(
+                "SELECT 1 FROM memory_preference WHERE id=?", (pair_id,)
+            ).fetchone()
+            if exists is None:
+                raise FormatFail("adapter references unknown preference pair")
+        version_row = self._conn.execute(
+            """
+            SELECT COALESCE(MAX(version), 0) + 1 AS version
+            FROM memory_adapter WHERE task_type=? AND surface=?
+            """,
+            (task_type, surface),
+        ).fetchone()
+        version = int(version_row["version"])
+        adapter_id = _text(payload, "adapter_id")
+        created = _int(payload, "created")
+        self._conn.execute(
+            """
+            INSERT INTO memory_adapter(
+              id, task_type, surface, version, parent_id, state, config_json,
+              train_pair_count, eval_score, baseline_score, golden_rows, golden_passed,
+              ship_blocked_reason, source_artifact, created, updated
+            ) VALUES(?,?,?,?,?,'candidate',?,?,NULL,NULL,NULL,NULL,NULL,?,?,?)
+            """,
+            (
+                adapter_id,
+                task_type,
+                surface,
+                version,
+                _opt_text(payload, "parent_id"),
+                config_json,
+                train_pair_count,
+                _opt_text(payload, "source_artifact"),
+                created,
+                created,
+            ),
+        )
+        for pair_id in pair_ids:
+            self._conn.execute(
+                "INSERT INTO memory_adapter_pair(adapter_id, pair_id) VALUES(?,?)",
+                (adapter_id, pair_id),
+            )
+        row = self._conn.execute(
+            "SELECT * FROM memory_adapter WHERE id=?", (adapter_id,)
+        ).fetchone()
+        if row is None:
+            raise FormatFail("memory adapter insert failed")
+        return dict(row)
+
+    def _op_evaluate_memory_adapter(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        adapter_id = _text(payload, "adapter_id")
+        row = self._conn.execute(
+            "SELECT state FROM memory_adapter WHERE id=?", (adapter_id,)
+        ).fetchone()
+        if row is None:
+            raise FormatFail("memory adapter does not exist")
+        if str(row["state"]) not in {"candidate", "evaluated", "rejected"}:
+            raise FormatFail("memory adapter cannot be evaluated from its state")
+        baseline = payload.get("baseline_score")
+        baseline_score = None if baseline is None else _score(payload, "baseline_score")
+        blocked = _opt_text(payload, "ship_blocked_reason")
+        self._conn.execute(
+            """
+            UPDATE memory_adapter
+            SET state='evaluated', eval_score=?, baseline_score=?, golden_rows=?,
+                golden_passed=?, ship_blocked_reason=?, updated=?
+            WHERE id=?
+            """,
+            (
+                _score(payload, "eval_score"),
+                baseline_score,
+                _int(payload, "golden_rows"),
+                1 if _bool(payload, "golden_passed") else 0,
+                blocked,
+                _int(payload, "updated"),
+                adapter_id,
+            ),
+        )
+        updated_row = self._conn.execute(
+            "SELECT * FROM memory_adapter WHERE id=?", (adapter_id,)
+        ).fetchone()
+        if updated_row is None:
+            raise FormatFail("memory adapter update failed")
+        return dict(updated_row)
+
+    def _op_ship_memory_adapter(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        adapter_id = _text(payload, "adapter_id")
+        updated = _int(payload, "updated")
+        row = self._conn.execute(
+            "SELECT * FROM memory_adapter WHERE id=?", (adapter_id,)
+        ).fetchone()
+        if row is None:
+            raise FormatFail("memory adapter does not exist")
+        adapter = dict(row)
+        if adapter["state"] == "shipped":
+            return {"changed": False, "row": adapter}
+        shippable = (
+            adapter["state"] == "evaluated"
+            and adapter["golden_passed"] == 1
+            and adapter["eval_score"] is not None
+        )
+        if not shippable:
+            raise AdapterShipBlocked("memory adapter is not shippable")
+        self._conn.execute(
+            """
+            UPDATE memory_adapter SET state='retired', updated=?
+            WHERE task_type=? AND surface=? AND state='shipped' AND id<>?
+            """,
+            (updated, adapter["task_type"], adapter["surface"], adapter_id),
+        )
+        self._conn.execute(
+            "UPDATE memory_adapter SET state='shipped', updated=? WHERE id=?",
+            (updated, adapter_id),
+        )
+        shipped = self._conn.execute(
+            "SELECT * FROM memory_adapter WHERE id=?", (adapter_id,)
+        ).fetchone()
+        if shipped is None:
+            raise FormatFail("memory adapter ship failed")
+        return {"changed": True, "row": dict(shipped)}
+
+    def _op_set_memory_adapter_state(self, payload: Mapping[str, Any]) -> bool:
+        to_state = _text(payload, "to_state")
+        if to_state not in {"rejected", "retired"}:
+            raise FormatFail("memory adapter state update is off-vocabulary")
+        cursor = self._conn.execute(
+            "UPDATE memory_adapter SET state=?, updated=? WHERE id=? AND state<>?",
+            (to_state, _int(payload, "updated"), _text(payload, "adapter_id"), to_state),
+        )
+        return cursor.rowcount == 1
+
+    def _op_record_memory_sla(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        surface = _text(payload, "surface")
+        if not surface:
+            raise FormatFail("memory SLA surface must be non-empty")
+        target = _int(payload, "target_cost_micro")
+        cost = _int(payload, "cost_micro")
+        at = _int(payload, "created")
+        if target < 0 or cost < 0:
+            raise FormatFail("memory SLA costs must be >= 0")
+        existing = self._conn.execute(
+            "SELECT * FROM memory_sla WHERE surface=?", (surface,)
+        ).fetchone()
+        if existing is None:
+            met = cost <= target
+            best = cost
+            last = cost
+            met_at = at if met else None
+            observations = 1
+            regressions = 0
+            flagged = 0
+            violation_json = None
+            self._conn.execute(
+                """
+                INSERT INTO memory_sla(
+                  surface, target_cost_micro, best_cost_micro, last_cost_micro, met,
+                  met_at, observations, regressions, flagged, violation_json,
+                  created, updated
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    surface,
+                    target,
+                    best,
+                    last,
+                    1 if met else 0,
+                    met_at,
+                    observations,
+                    regressions,
+                    flagged,
+                    violation_json,
+                    at,
+                    at,
+                ),
+            )
+        else:
+            row = dict(existing)
+            if int(row["target_cost_micro"]) != target:
+                raise FormatFail("memory SLA target is immutable")
+            previous_last = int(row["last_cost_micro"])
+            regression = cost > previous_last
+            best = min(int(row["best_cost_micro"]), cost)
+            was_met = int(row["met"]) == 1
+            met = was_met or cost <= target
+            met_at = row["met_at"] if was_met else (at if met else None)
+            observations = int(row["observations"]) + 1
+            regressions = int(row["regressions"]) + (1 if regression else 0)
+            flagged = int(row["flagged"]) or (1 if regression else 0)
+            violation_json = row["violation_json"]
+            if regression:
+                violation = {
+                    "at": at,
+                    "cost_micro": cost,
+                    "previous_cost_micro": previous_last,
+                    "target_cost_micro": target,
+                    "best_after_micro": best,
+                    "reason": "cost_regression",
+                }
+                violation_json = json.dumps(
+                    violation, sort_keys=True, separators=(",", ":")
+                )
+            self._conn.execute(
+                """
+                UPDATE memory_sla
+                SET best_cost_micro=?, last_cost_micro=?, met=?, met_at=?, observations=?,
+                    regressions=?, flagged=?, violation_json=?, updated=?
+                WHERE surface=?
+                """,
+                (
+                    best,
+                    cost,
+                    1 if met else 0,
+                    met_at,
+                    observations,
+                    regressions,
+                    flagged,
+                    violation_json,
+                    at,
+                    surface,
+                ),
+            )
+        self._conn.execute(
+            """
+            INSERT INTO memory_sla_event(
+              id, surface, cost_micro, target_cost_micro, best_after_micro,
+              last_after_micro, met_after, flagged_after, regression, created
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                _text(payload, "sla_event_id"),
+                surface,
+                cost,
+                target,
+                best,
+                cost,
+                1 if (existing is None and cost <= target) or (existing is not None and met) else 0,
+                flagged,
+                1 if existing is not None and cost > int(dict(existing)["last_cost_micro"]) else 0,
+                at,
+            ),
+        )
+        saved = self._conn.execute(
+            "SELECT * FROM memory_sla WHERE surface=?", (surface,)
+        ).fetchone()
+        if saved is None:
+            raise FormatFail("memory SLA write failed")
+        return dict(saved)
+
+    def _op_record_memory_retrieval(self, payload: Mapping[str, Any]) -> str:
+        retrieval_id = _text(payload, "retrieval_id")
+        self._conn.execute(
+            """
+            INSERT INTO memory_retrieval(
+              id, run_id, surface, task_type, packet_sha, adapter_id, prior_ids_json,
+              pair_ids_json, relevance, created
+            ) VALUES(?,?,?,?,?,?,?,?,NULL,?)
+            """,
+            (
+                retrieval_id,
+                _opt_text(payload, "run_id"),
+                _text(payload, "surface"),
+                _opt_text(payload, "task_type"),
+                _opt_text(payload, "packet_sha"),
+                _opt_text(payload, "adapter_id"),
+                _json_text(payload, "prior_ids_json"),
+                _json_text(payload, "pair_ids_json"),
+                _int(payload, "created"),
+            ),
+        )
+        return retrieval_id
+
+    def _op_update_memory_retrieval_relevance(self, payload: Mapping[str, Any]) -> int:
+        relevance = _score(payload, "relevance")
+        retrieval_id = _opt_text(payload, "retrieval_id")
+        packet_sha = _opt_text(payload, "packet_sha")
+        if retrieval_id is None and packet_sha is None:
+            raise FormatFail("memory relevance update requires retrieval_id or packet_sha")
+        if retrieval_id is not None:
+            cursor = self._conn.execute(
+                "UPDATE memory_retrieval SET relevance=? WHERE id=?",
+                (relevance, retrieval_id),
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE memory_retrieval SET relevance=? WHERE packet_sha=?",
+                (relevance, packet_sha),
+            )
+        return int(cursor.rowcount)
+
     def _op_sweep_artifacts(self, payload: Mapping[str, Any]) -> int:
         # Retention deletes are executed as part of a ledger batch so they share
         # the single-writer mailbox and one transaction (RA-RET-003).
@@ -1158,6 +1566,198 @@ class LedgerStore:
             rows = self._conn.execute(sql + " LIMIT ?", (ring_node, limit)).fetchall()
         return [dict(row) for row in rows]
 
+    def memory_prior_row(self, prior_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM memory_prior WHERE id=?", (prior_id,)).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_prior_by_key(self, kind: str, surface: str, key: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_prior WHERE kind=? AND surface=? AND key=?",
+            (kind, surface, key),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_priors(
+        self,
+        surface: str | None = None,
+        *,
+        kind: str | None = None,
+        state: str = "active",
+        include_global: bool = True,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if state not in {"active", "retired"}:
+            raise FormatFail("memory prior state is invalid")
+        clauses = ["state=?"]
+        params: list[object] = [state]
+        if surface is not None:
+            if include_global:
+                clauses.append("(surface=? OR surface='*')")
+            else:
+                clauses.append("surface=?")
+            params.append(surface)
+        if kind is not None:
+            clauses.append("kind=?")
+            params.append(kind)
+        sql = (
+            "SELECT * FROM memory_prior WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY score DESC, support DESC, updated DESC, id ASC LIMIT ?"
+        )
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def memory_preference_row(self, pair_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_preference WHERE id=?", (pair_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_preferences(
+        self,
+        *,
+        task_type: str | None = None,
+        surface: str | None = None,
+        surfaces: Sequence[str] | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if surfaces is not None and not surfaces:
+            return []
+        clauses: list[str] = []
+        params: list[object] = []
+        if task_type is not None:
+            clauses.append("task_type=?")
+            params.append(task_type)
+        if surfaces is not None:
+            placeholders = ",".join("?" for _ in surfaces)
+            clauses.append(f"surface IN ({placeholders})")
+            params.extend(surfaces)
+        elif surface is not None:
+            clauses.append("surface=?")
+            params.append(surface)
+        sql = "SELECT * FROM memory_preference"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY reward DESC, created DESC, id ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def memory_adapter_row(self, adapter_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_adapter WHERE id=?", (adapter_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_adapters(
+        self,
+        *,
+        task_type: str | None = None,
+        surface: str | None = None,
+        state: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if state is not None and state not in {
+            "candidate",
+            "evaluated",
+            "shipped",
+            "rejected",
+            "retired",
+        }:
+            raise FormatFail("memory adapter state is invalid")
+        clauses: list[str] = []
+        params: list[object] = []
+        if task_type is not None:
+            clauses.append("task_type=?")
+            params.append(task_type)
+        if surface is not None:
+            clauses.append("surface=?")
+            params.append(surface)
+        if state is not None:
+            clauses.append("state=?")
+            params.append(state)
+        sql = "SELECT * FROM memory_adapter"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY version DESC, created DESC, id ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def memory_active_adapter(self, task_type: str, surface: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM memory_adapter
+            WHERE task_type=? AND surface=? AND state='shipped'
+            ORDER BY version DESC, created DESC, id ASC LIMIT 1
+            """,
+            (task_type, surface),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_adapter_pair_ids(self, adapter_id: str) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT pair_id FROM memory_adapter_pair WHERE adapter_id=? ORDER BY pair_id",
+            (adapter_id,),
+        ).fetchall()
+        return [str(row["pair_id"]) for row in rows]
+
+    def memory_sla_row(self, surface: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_sla WHERE surface=?", (surface,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_sla_rows(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM memory_sla ORDER BY surface ASC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def memory_sla_events(self, surface: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM memory_sla_event
+            WHERE surface=? ORDER BY created ASC, id ASC LIMIT ?
+            """,
+            (surface, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def memory_retrieval_row(self, retrieval_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_retrieval WHERE id=?", (retrieval_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def memory_retrievals(
+        self,
+        *,
+        surface: str | None = None,
+        task_type: str | None = None,
+        packet_sha: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if surface is not None:
+            clauses.append("surface=?")
+            params.append(surface)
+        if task_type is not None:
+            clauses.append("task_type=?")
+            params.append(task_type)
+        if packet_sha is not None:
+            clauses.append("packet_sha=?")
+            params.append(packet_sha)
+        sql = "SELECT * FROM memory_retrieval"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
     def retention_candidates(
         self, ttl_class: str, *, cutoff: int, limit: int
     ) -> list[dict[str, Any]]:
@@ -1269,6 +1869,13 @@ class LedgerStore:
             "golden_row",
             "packet_log",
             "audit",
+            "memory_prior",
+            "memory_preference",
+            "memory_adapter",
+            "memory_adapter_pair",
+            "memory_sla",
+            "memory_sla_event",
+            "memory_retrieval",
         ]
         out: dict[str, int] = {}
         for table in tables:

@@ -418,6 +418,239 @@ class Ledger:
         )
         return cast(int, result)
 
+    async def upsert_memory_prior(
+        self,
+        *,
+        kind: str,
+        surface: str,
+        key: str,
+        value: Mapping[str, Any],
+        score: float,
+        support: int,
+        confidence: float,
+        source_claim: str | None = None,
+        source_artifact: str | None = None,
+        prior_id: str | None = None,
+        created: int | None = None,
+        updated: int | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a compounding-memory prior (RA-MEM)."""
+        now = now_ms()
+        result = await self._submit(
+            "upsert_memory_prior",
+            {
+                "prior_id": prior_id or self._ids.new("mem"),
+                "kind": kind,
+                "surface": surface,
+                "key": key,
+                "value_json": json.dumps(value, sort_keys=True, separators=(",", ":")),
+                "score": score,
+                "support": support,
+                "confidence": confidence,
+                "source_claim": source_claim,
+                "source_artifact": source_artifact,
+                "created": now if created is None else created,
+                "updated": now if updated is None else updated,
+            },
+            rows=2,
+        )
+        return cast(dict[str, Any], result)
+
+    async def retire_memory_prior(self, prior_id: str, *, updated: int | None = None) -> bool:
+        """Retire one memory prior without deleting its audit trail."""
+        result = await self._submit(
+            "retire_memory_prior",
+            {"prior_id": prior_id, "updated": now_ms() if updated is None else updated},
+        )
+        return cast(bool, result)
+
+    async def ensure_memory_preference(
+        self,
+        *,
+        pair_id: str,
+        task_type: str,
+        surface: str,
+        prompt_sha: str,
+        chosen: Mapping[str, Any],
+        rejected: Mapping[str, Any],
+        reward: float,
+        rationale: str | None = None,
+        source_claim: str | None = None,
+        source_artifact: str | None = None,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        """Insert one preference pair idempotently by pair_id."""
+        result = await self._submit(
+            "ensure_memory_preference",
+            {
+                "pair_id": pair_id,
+                "task_type": task_type,
+                "surface": surface,
+                "prompt_sha": prompt_sha,
+                "chosen_json": json.dumps(chosen, sort_keys=True, separators=(",", ":")),
+                "rejected_json": json.dumps(rejected, sort_keys=True, separators=(",", ":")),
+                "reward": reward,
+                "rationale": rationale,
+                "source_claim": source_claim,
+                "source_artifact": source_artifact,
+                "created": now_ms() if created is None else created,
+            },
+        )
+        return cast(dict[str, Any], result)
+
+    async def create_memory_adapter(
+        self,
+        *,
+        adapter_id: str,
+        task_type: str,
+        surface: str,
+        pair_ids: Sequence[str],
+        config: Mapping[str, Any],
+        parent_id: str | None = None,
+        source_artifact: str | None = None,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a candidate LoRA-style adapter bound to preference pairs."""
+        pair_list = list(pair_ids)
+        if not pair_list:
+            raise FormatFail("memory adapter requires at least one preference pair")
+        result = await self._submit(
+            "create_memory_adapter",
+            {
+                "adapter_id": adapter_id,
+                "task_type": task_type,
+                "surface": surface,
+                "pair_ids": [{"pair_id": pair_id} for pair_id in pair_list],
+                "train_pair_count": len(pair_list),
+                "config_json": json.dumps(config, sort_keys=True, separators=(",", ":")),
+                "parent_id": parent_id,
+                "source_artifact": source_artifact,
+                "created": now_ms() if created is None else created,
+            },
+            rows=len(pair_list) + 1,
+        )
+        return cast(dict[str, Any], result)
+
+    async def evaluate_memory_adapter(
+        self,
+        adapter_id: str,
+        *,
+        eval_score: float,
+        golden_rows: int,
+        golden_passed: bool,
+        baseline_score: float | None = None,
+        ship_blocked_reason: str | None = None,
+        updated: int | None = None,
+    ) -> dict[str, Any]:
+        """Record golden-set evaluation for a candidate adapter."""
+        result = await self._submit(
+            "evaluate_memory_adapter",
+            {
+                "adapter_id": adapter_id,
+                "eval_score": eval_score,
+                "baseline_score": baseline_score,
+                "golden_rows": golden_rows,
+                "golden_passed": golden_passed,
+                "ship_blocked_reason": ship_blocked_reason,
+                "updated": now_ms() if updated is None else updated,
+            },
+        )
+        return cast(dict[str, Any], result)
+
+    async def ship_memory_adapter(self, adapter_id: str, *, updated: int | None = None) -> dict[str, Any]:
+        """Ship one evaluated adapter and atomically retire prior shipped adapters."""
+        result = await self._submit(
+            "ship_memory_adapter",
+            {"adapter_id": adapter_id, "updated": now_ms() if updated is None else updated},
+            rows=2,
+        )
+        return cast(dict[str, Any], result)
+
+    async def set_memory_adapter_state(
+        self, adapter_id: str, to_state: str, *, updated: int | None = None
+    ) -> bool:
+        """Move an adapter to rejected or retired."""
+        result = await self._submit(
+            "set_memory_adapter_state",
+            {
+                "adapter_id": adapter_id,
+                "to_state": to_state,
+                "updated": now_ms() if updated is None else updated,
+            },
+        )
+        return cast(bool, result)
+
+    async def record_memory_sla(
+        self,
+        surface: str,
+        *,
+        target_cost_micro: int,
+        cost_micro: int,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        """Record one cost-to-first-valid-PoC observation with monotonic SLA state."""
+        at = now_ms() if created is None else created
+        result = await self._submit(
+            "record_memory_sla",
+            {
+                "surface": surface,
+                "target_cost_micro": target_cost_micro,
+                "cost_micro": cost_micro,
+                "sla_event_id": self._ids.new("sla"),
+                "created": at,
+            },
+            rows=2,
+        )
+        return cast(dict[str, Any], result)
+
+    async def record_memory_retrieval(
+        self,
+        *,
+        surface: str,
+        prior_ids: Sequence[str],
+        pair_ids: Sequence[str] = (),
+        run_id: str | None = None,
+        task_type: str | None = None,
+        packet_sha: str | None = None,
+        adapter_id: str | None = None,
+        retrieval_id: str | None = None,
+        created: int | None = None,
+    ) -> str:
+        """Record the priors/pairs selected for one retrieval packet."""
+        result = await self._submit(
+            "record_memory_retrieval",
+            {
+                "retrieval_id": retrieval_id or self._ids.new("ret"),
+                "run_id": run_id,
+                "surface": surface,
+                "task_type": task_type,
+                "packet_sha": packet_sha,
+                "adapter_id": adapter_id,
+                "prior_ids_json": json.dumps(list(prior_ids), separators=(",", ":")),
+                "pair_ids_json": json.dumps(list(pair_ids), separators=(",", ":")),
+                "created": now_ms() if created is None else created,
+            },
+        )
+        return cast(str, result)
+
+    async def record_memory_retrieval_relevance(
+        self,
+        *,
+        relevance: float,
+        retrieval_id: str | None = None,
+        packet_sha: str | None = None,
+    ) -> int:
+        """Attach citation/retrieval relevance telemetry to a packet."""
+        result = await self._submit(
+            "update_memory_retrieval_relevance",
+            {
+                "retrieval_id": retrieval_id,
+                "packet_sha": packet_sha,
+                "relevance": relevance,
+            },
+        )
+        return cast(int, result)
+
     # Read-side pass-throughs.
     def get_claim(self, claim_id: str) -> dict[str, Any] | None:
         """Fetch a claim by ID."""
@@ -499,6 +732,99 @@ class Ledger:
     def entry_points(self, ring_node: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Entry points for one ring node in rank order."""
         return self.store.entry_points(ring_node, limit=limit)
+
+    def memory_prior_row(self, prior_id: str) -> dict[str, Any] | None:
+        """Fetch one memory prior."""
+        return self.store.memory_prior_row(prior_id)
+
+    def memory_prior_by_key(self, kind: str, surface: str, key: str) -> dict[str, Any] | None:
+        """Fetch one memory prior by its natural key."""
+        return self.store.memory_prior_by_key(kind, surface, key)
+
+    def memory_priors(
+        self,
+        surface: str | None = None,
+        *,
+        kind: str | None = None,
+        state: str = "active",
+        include_global: bool = True,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List ranked memory priors."""
+        return self.store.memory_priors(
+            surface, kind=kind, state=state, include_global=include_global, limit=limit
+        )
+
+    def memory_preference_row(self, pair_id: str) -> dict[str, Any] | None:
+        """Fetch one preference pair."""
+        return self.store.memory_preference_row(pair_id)
+
+    def memory_preferences(
+        self,
+        *,
+        task_type: str | None = None,
+        surface: str | None = None,
+        surfaces: Sequence[str] | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List preference pairs by reward."""
+        return self.store.memory_preferences(
+            task_type=task_type, surface=surface, surfaces=surfaces, limit=limit
+        )
+
+    def memory_adapter_row(self, adapter_id: str) -> dict[str, Any] | None:
+        """Fetch one memory adapter."""
+        return self.store.memory_adapter_row(adapter_id)
+
+    def memory_adapters(
+        self,
+        *,
+        task_type: str | None = None,
+        surface: str | None = None,
+        state: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List memory adapters."""
+        return self.store.memory_adapters(
+            task_type=task_type, surface=surface, state=state, limit=limit
+        )
+
+    def memory_active_adapter(self, task_type: str, surface: str) -> dict[str, Any] | None:
+        """Fetch the currently shipped adapter for a scope."""
+        return self.store.memory_active_adapter(task_type, surface)
+
+    def memory_adapter_pair_ids(self, adapter_id: str) -> list[str]:
+        """List preference pair ids bound to an adapter."""
+        return self.store.memory_adapter_pair_ids(adapter_id)
+
+    def memory_sla_row(self, surface: str) -> dict[str, Any] | None:
+        """Fetch SLA state for one surface."""
+        return self.store.memory_sla_row(surface)
+
+    def memory_sla_rows(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        """List SLA rows."""
+        return self.store.memory_sla_rows(limit=limit)
+
+    def memory_sla_events(self, surface: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List SLA observations for one surface."""
+        return self.store.memory_sla_events(surface, limit=limit)
+
+    def memory_retrieval_row(self, retrieval_id: str) -> dict[str, Any] | None:
+        """Fetch one retrieval telemetry row."""
+        return self.store.memory_retrieval_row(retrieval_id)
+
+    def memory_retrievals(
+        self,
+        *,
+        surface: str | None = None,
+        task_type: str | None = None,
+        packet_sha: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List retrieval telemetry rows."""
+        return self.store.memory_retrievals(
+            surface=surface, task_type=task_type, packet_sha=packet_sha, limit=limit
+        )
 
     def retention_candidates(
         self, ttl_class: str, *, cutoff: int, limit: int
