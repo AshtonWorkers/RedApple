@@ -15,6 +15,7 @@ from .actor import LedgerActor
 from .db import LedgerStore
 from .ids import UlidFactory, artifact_id, dedup_key, now_ms, sha256_hex
 from .models import ArtifactInput, ClaimArtifactInput, ClaimInput
+from .operations import LedgerOperation
 from .states import ClaimState
 
 __all__ = [
@@ -96,8 +97,36 @@ class Ledger:
             "ttl_class": artifact.ttl_class,
         }
 
-    async def _submit(self, kind: str, payload: Mapping[str, Any], *, rows: int = 1) -> object:
-        return await self.actor.submit(kind, payload, rows=rows)
+    async def _submit(
+        self,
+        kind: str,
+        payload: Mapping[str, Any],
+        *,
+        rows: int = 1,
+        immediate: bool = False,
+    ) -> object:
+        return await self.actor.submit(kind, payload, rows=rows, immediate=immediate)
+
+    async def submit_batch(self, operations: Sequence[LedgerOperation]) -> list[object]:
+        """Apply already-formed ledger operations as one immediate atomic batch."""
+        if not operations:
+            return []
+        encoded = [
+            {
+                "kind": operation.kind,
+                "payload": dict(operation.payload),
+                "rows": operation.rows,
+            }
+            for operation in operations
+        ]
+        rows = sum(operation.rows for operation in operations)
+        result = await self._submit(
+            "batch",
+            {"operations": encoded},
+            rows=rows,
+            immediate=True,
+        )
+        return cast(list[object], result)
 
     async def create_run(
         self,
@@ -181,6 +210,7 @@ class Ledger:
         spent_usd_micro: int,
         run_id: str | None = None,
         wo_id: str | None = None,
+        unit: str | None = None,
         created: int | None = None,
     ) -> int:
         """Record a policy decision; money is integer micro-USD (I4)."""
@@ -193,6 +223,7 @@ class Ledger:
             {
                 "run_id": run_id,
                 "wo_id": wo_id,
+                "unit": unit,
                 "trigger_metric": trigger_metric,
                 "observed": observed,
                 "expected": expected,
@@ -213,9 +244,15 @@ class Ledger:
         payload_json: str | None = None,
         work_order_id: str | None = None,
         created: int | None = None,
+        decision: Mapping[str, Any] | None = None,
     ) -> str:
-        """Enqueue a policy work order."""
+        """Enqueue a policy work order, optionally with its plan decision atomically."""
         wid = work_order_id or self._ids.new("wo")
+        decision_payload: dict[str, Any] | None = None
+        if decision is not None:
+            decision_payload = dict(decision)
+            decision_payload.setdefault("wo_id", wid)
+            decision_payload.setdefault("created", now_ms())
         result = await self._submit(
             "enqueue_work_order",
             {
@@ -227,7 +264,9 @@ class Ledger:
                 "ev_cost": ev_cost,
                 "state": state,
                 "created": now_ms() if created is None else created,
+                "decision": decision_payload,
             },
+            rows=2 if decision_payload is not None else 1,
         )
         return cast(str, result)
 
@@ -267,6 +306,52 @@ class Ledger:
             rows=2,
         )
         return cast(dict[str, object], result)
+
+    async def settle_work_order(
+        self,
+        work_order_id: str,
+        *,
+        state: str,
+        payload_json: str | None = None,
+        trigger_metric: str,
+        observed: float,
+        expected: str,
+        spent_usd_micro: int,
+        run_id: str | None = None,
+        created: int | None = None,
+    ) -> bool:
+        """Atomically settle a ready work order and record its decision."""
+        if isinstance(spent_usd_micro, bool) or not isinstance(spent_usd_micro, int):
+            raise FormatFail("spent_usd_micro must be int")
+        result = await self._submit(
+            "settle_work_order",
+            {
+                "work_order_id": work_order_id,
+                "state": state,
+                "payload_json": payload_json,
+                "decision": {
+                    "run_id": run_id,
+                    "wo_id": work_order_id,
+                    "trigger_metric": trigger_metric,
+                    "observed": observed,
+                    "expected": expected,
+                    "spent_usd_micro": spent_usd_micro,
+                    "created": now_ms() if created is None else created,
+                },
+            },
+            rows=2,
+        )
+        return cast(bool, result)
+
+    async def shed_work_order(
+        self, work_order_id: str, *, state: str, payload_json: str | None = None
+    ) -> bool:
+        """Move a still-ready work order out of the dispatch backlog."""
+        result = await self._submit(
+            "shed_work_order",
+            {"work_order_id": work_order_id, "state": state, "payload_json": payload_json},
+        )
+        return cast(bool, result)
 
     async def record_packet_log(
         self,
@@ -923,6 +1008,28 @@ class Ledger:
     def spent_usd_micro(self, run_id: str | None = None) -> int:
         """Total recorded spend in integer micro-USD."""
         return self.store.spent_usd_micro(run_id)
+
+    def decision_rows(
+        self,
+        *,
+        unit: str | None = None,
+        wo_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List policy decisions in commit order."""
+        return self.store.decision_rows(unit=unit, wo_id=wo_id, limit=limit)
+
+    def ready_work_order_count(self) -> int:
+        """Count ready work orders."""
+        return self.store.ready_work_order_count()
+
+    def ready_work_order_budget(self) -> tuple[int, int]:
+        """Return ready count and summed payload CAS bytes in one read."""
+        return self.store.ready_work_order_budget()
+
+    def ready_work_order_cas_bytes(self) -> int:
+        """Sum ready work-order CAS bytes from policy payloads."""
+        return self.store.ready_work_order_cas_bytes()
 
     def ring_nodes(self) -> list[dict[str, Any]]:
         """List ring nodes."""

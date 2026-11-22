@@ -12,6 +12,7 @@ from ra.ledger import (
     Ledger,
 )
 from ra.ledger.ids import UlidFactory, artifact_id, dedup_key
+from ra.ledger.operations import LedgerOperation
 from ra.ledger.states import TRANSITIONS
 from tests.conftest import run
 
@@ -230,5 +231,109 @@ def test_RA_LED_008_auxiliary_rows():
             assert ledger.ring_node("node-1")["state"] == "current"
         finally:
             await ledger.close()
+
+    run(body())
+
+
+def test_RA_LED_work_order_settle_shed_public_paths():
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            wid = await ledger.enqueue_work_order(
+                action="park", unit="u", ev_cost=1.0, payload_json='{"cas_bytes":0}'
+            )
+            assert (
+                await ledger.settle_work_order(
+                    wid,
+                    state="done",
+                    trigger_metric="t",
+                    observed=1.0,
+                    expected="e",
+                    spent_usd_micro=0,
+                )
+                is True
+            )
+            row = ledger.get_work_order(wid)
+            assert row is not None and row["state"] == "done"
+            decisions = ledger.decision_rows(wo_id=wid)
+            assert decisions[0]["unit"] == "u"
+
+            with pytest.raises(FormatFail):
+                await ledger.settle_work_order(
+                    wid,
+                    state="done",
+                    trigger_metric="t",
+                    observed=1.0,
+                    expected="e",
+                    spent_usd_micro=0,
+                )
+            with pytest.raises(FormatFail):
+                await ledger.settle_work_order(
+                    "missing",
+                    state="done",
+                    trigger_metric="t",
+                    observed=1.0,
+                    expected="e",
+                    spent_usd_micro=0,
+                )
+
+            wid2 = await ledger.enqueue_work_order(action="park", unit="u2", ev_cost=1.0)
+            assert (
+                await ledger.shed_work_order(
+                    wid2, state="shed", payload_json='{"shed_reason":"test"}'
+                )
+                is True
+            )
+            row2 = ledger.get_work_order(wid2)
+            assert row2 is not None and row2["state"] == "shed"
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
+def test_RA_LED_batch_operation_validation():
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            cases = [
+                {"operations": []},
+                {"operations": [1]},
+                {"operations": [{"kind": "batch", "payload": {}, "rows": 1}]},
+                {"operations": [{"kind": "record_decision", "payload": [], "rows": 1}]},
+                {"operations": [{"kind": "record_decision", "payload": {}, "rows": 0}]},
+                {"operations": [{"kind": "nope", "payload": {}, "rows": 1}]},
+            ]
+            for operations in cases:
+                with pytest.raises(FormatFail):
+                    ledger.store.apply_batch(
+                        [LedgerOperation("batch", {"operations": operations}, rows=1)]
+                    )
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
+def test_RA_LED_introspection_and_context_manager():
+    async def body():
+        async with await Ledger.open(":memory:") as ledger:
+            artifact = await ledger.put_artifact("crash", b"pin", ttl_class="pinned")
+            assert ledger.artifact_ttl_counts() == {"pinned": 1}
+            oldest = ledger.oldest_artifact("pinned")
+            assert oldest is not None and oldest["id"] == artifact
+            assert "work_order" in ledger.table_names()
+            indexes = ledger.index_names("work_order")
+            assert "ix_wo_ready_ev" in indexes
+            assert "ix_wo_ready_cas" in indexes
+            assert await ledger.sweep_artifacts("ephemeral", limit=1) == 0
+            assert ledger.claims_by_state(ClaimState.LIMBO) == []
+            with pytest.raises(FormatFail):
+                await ledger.record_decision(
+                    trigger_metric="t",
+                    observed=1.0,
+                    expected="e",
+                    spent_usd_micro=True,
+                )
 
     run(body())

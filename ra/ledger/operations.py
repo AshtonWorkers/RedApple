@@ -15,4 +15,5 @@ class LedgerOperation:
     kind: str
     payload: Mapping[str, Any]
     rows: int = 1
+    immediate: bool = False
     future: asyncio.Future[object] | None = field(default=None, repr=False)

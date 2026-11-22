@@ -47,11 +47,13 @@ CLAIM_TYPES = frozenset(
     }
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
-WORK_ORDER_STATES = frozenset({"ready", "parked", "done"})
+WORK_ORDER_STATES = frozenset({"ready", "parked", "done", "failed", "shed"})
 WORK_ORDER_TRANSITIONS: dict[str, frozenset[str]] = {
     "ready": frozenset({"parked", "done"}),
     "parked": frozenset(),
     "done": frozenset(),
+    "failed": frozenset(),
+    "shed": frozenset(),
 }
 RUN_MODES = frozenset({"macos", "ios"})
 RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})
@@ -109,6 +111,14 @@ def _opt_text(payload: Mapping[str, Any], key: str) -> str | None:
     return value
 
 
+def _opt_str(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise FormatFail(f"ledger payload {name} must be str or None")
+    return value
+
+
 def _int(payload: Mapping[str, Any], key: str) -> int:
     value = payload[key]
     if isinstance(value, bool) or not isinstance(value, int):
@@ -136,6 +146,22 @@ def _bool(payload: Mapping[str, Any], key: str) -> bool:
     value = payload[key]
     if not isinstance(value, bool):
         raise FormatFail(f"ledger payload {key} must be bool")
+    return value
+
+
+def _payload_cas_bytes(payload_json: str | None) -> int:
+    """Extract a non-negative integer cas_bytes value from work-order JSON."""
+    if not payload_json:
+        return 0
+    try:
+        loaded = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(loaded, dict):
+        return 0
+    value = loaded.get("cas_bytes", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
     return value
 
 
@@ -225,6 +251,10 @@ _STORE_GUARDED_METHODS = frozenset(
         "ready_work_orders",
         "work_orders_for_unit",
         "spent_usd_micro",
+        "decision_rows",
+        "ready_work_order_count",
+        "ready_work_order_budget",
+        "ready_work_order_cas_bytes",
         "artifact_ttl_counts",
         "oldest_artifact",
         "ring_nodes",
@@ -332,10 +362,69 @@ class LedgerStore:
         else:
             self._conn.executescript(MEMORY_SCHEMA_SQL)
         self._conn.executescript(RING_SCHEMA_SQL)
+        self._ensure_column("decision", "unit", "TEXT")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_decision_unit ON decision(unit, created)"
+        )
+        cas_bytes_added = self._ensure_column(
+            "work_order", "cas_bytes", "INT NOT NULL DEFAULT 0"
+        )
+        if cas_bytes_added:
+            self._backfill_work_order_cas_bytes()
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_wo_ready_ev "
+            "ON work_order(state, ev_cost DESC, created, id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_wo_ready_cas ON work_order(state, cas_bytes)"
+        )
+
+    def _backfill_work_order_cas_bytes(self) -> None:
+        self._conn.execute(
+            """
+            UPDATE work_order SET cas_bytes = CASE
+              WHEN json_valid(payload_json) THEN CASE
+                WHEN json_type(payload_json, '$.cas_bytes') = 'integer'
+                     AND CAST(json_extract(payload_json, '$.cas_bytes') AS INTEGER) >= 0
+                THEN CAST(json_extract(payload_json, '$.cas_bytes') AS INTEGER)
+                ELSE 0 END
+              ELSE 0 END
+            WHERE payload_json IS NOT NULL
+            """
+        )
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> bool:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if not any(str(row["name"]) == column for row in rows):
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            return True
+        return False
 
     def close(self) -> None:
         """Close the SQLite connection."""
         self._conn.close()
+
+    def _validate_batch_payload(self, payload: Mapping[str, Any]) -> None:
+        raw = payload.get("operations")
+        if not isinstance(raw, list) or not raw:
+            raise FormatFail("batch operations must be a non-empty list")
+        for index, item in enumerate(raw):
+            if not isinstance(item, Mapping):
+                raise FormatFail(f"batch operation {index} must be an object")
+            kind = item.get("kind")
+            subpayload = item.get("payload")
+            rows = item.get("rows", 1)
+            if (
+                not isinstance(kind, str)
+                or not kind
+                or kind == "batch"
+                or getattr(self, f"_op_{kind}", None) is None
+            ):
+                raise FormatFail(f"batch operation {index} kind is invalid")
+            if not isinstance(subpayload, Mapping):
+                raise FormatFail(f"batch operation {index} payload must be an object")
+            if isinstance(rows, bool) or not isinstance(rows, int) or rows < 1:
+                raise FormatFail(f"batch operation {index} rows must be int >= 1")
 
     def apply_batch(self, operations: Sequence[LedgerOperation]) -> list[object]:
         """Apply operations with per-operation savepoints.
@@ -345,6 +434,16 @@ class LedgerStore:
         """
         if not operations:
             return []
+        try:
+            for operation in operations:
+                if operation.kind == "batch":
+                    if not isinstance(operation.payload, Mapping):
+                        raise FormatFail("batch payload must be an object")
+                    self._validate_batch_payload(operation.payload)
+        except FormatFail as exc:
+            for operation in operations:
+                self._set_future_exception(operation, exc)
+            raise
         results: list[object] = [_MISSING] * len(operations)
         failures: dict[int, BaseException] = {}
         storage_error: BaseException | None = None
@@ -414,6 +513,40 @@ class LedgerStore:
         if handler is None:
             raise FormatFail(f"unknown ledger operation {operation.kind}")
         return handler(operation.payload)
+
+    def _op_batch(self, payload: Mapping[str, Any]) -> list[object]:
+        raw = payload.get("operations")
+        if not isinstance(raw, list) or not raw:
+            raise FormatFail("batch operations must be a non-empty list")
+        results: list[object] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, Mapping):
+                raise FormatFail(f"batch operation {index} must be an object")
+            kind = item.get("kind")
+            subpayload = item.get("payload")
+            rows = item.get("rows", 1)
+            if not isinstance(kind, str) or not kind or kind == "batch":
+                raise FormatFail(f"batch operation {index} kind is invalid")
+            if not isinstance(subpayload, Mapping):
+                raise FormatFail(f"batch operation {index} payload must be an object")
+            if isinstance(rows, bool) or not isinstance(rows, int) or rows < 1:
+                raise FormatFail(f"batch operation {index} rows must be int >= 1")
+            savepoint = f"ra_batch_{index}"
+            self._conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                result = self._apply_operation(
+                    LedgerOperation(kind=kind, payload=subpayload, rows=rows)
+                )
+            except RaError:
+                self._rollback_to_savepoint(savepoint)
+                results.append(None)
+            except sqlite3.IntegrityError:
+                self._rollback_to_savepoint(savepoint)
+                results.append(None)
+            else:
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                results.append(result)
+        return results
 
     def _op_create_run(self, payload: Mapping[str, Any]) -> str:
         run_id = _text(payload, "run_id")
@@ -545,18 +678,26 @@ class LedgerStore:
             "changed": True,
         }
 
-    def _op_record_decision(self, payload: Mapping[str, Any]) -> int:
+    def _insert_decision_row(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        unit: str | None = None,
+        wo_id: str | None = None,
+    ) -> int:
         spent = _int(payload, "spent_usd_micro")
         if spent < 0:
             raise FormatFail("spent_usd_micro must be non-negative")
         cursor = self._conn.execute(
             """
-            INSERT INTO decision(run_id, wo_id, trigger_metric, observed, expected, spent_usd_micro, created)
-            VALUES(?,?,?,?,?,?,?)
+            INSERT INTO decision(run_id, wo_id, unit, trigger_metric, observed, expected,
+              spent_usd_micro, created)
+            VALUES(?,?,?,?,?,?,?,?)
             """,
             (
-                _opt_text(payload, "run_id"),
-                _opt_text(payload, "wo_id"),
+                _opt_str(payload.get("run_id"), "run_id"),
+                _opt_str(payload.get("wo_id", wo_id), "wo_id"),
+                _opt_str(payload.get("unit", unit), "unit"),
                 _text(payload, "trigger_metric"),
                 _float(payload, "observed"),
                 _text(payload, "expected"),
@@ -566,10 +707,14 @@ class LedgerStore:
         )
         return int(cursor.lastrowid or 0)
 
+    def _op_record_decision(self, payload: Mapping[str, Any]) -> int:
+        return self._insert_decision_row(payload)
+
     def _op_enqueue_work_order(self, payload: Mapping[str, Any]) -> str:
         work_order_id = _text(payload, "work_order_id")
         action = _text(payload, "action")
         state = _text(payload, "state")
+        unit = _text(payload, "unit")
         allowed = {
             "retarget",
             "reweight",
@@ -585,18 +730,22 @@ class LedgerStore:
             raise FormatFail("work_order action is off-vocabulary")
         if state not in WORK_ORDER_STATES:
             raise FormatFail("work_order state is invalid")
+        payload_json = _opt_text(payload, "payload_json")
         try:
             self._conn.execute(
                 """
-                INSERT INTO work_order(id, run_id, action, unit, payload_json, ev_cost, state, created)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO work_order(
+                  id, run_id, action, unit, payload_json, cas_bytes, ev_cost, state, created
+                )
+                VALUES(?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     work_order_id,
                     _opt_text(payload, "run_id"),
                     action,
-                    _text(payload, "unit"),
-                    _opt_text(payload, "payload_json"),
+                    unit,
+                    payload_json,
+                    _payload_cas_bytes(payload_json),
                     _finite_nonnegative_float(payload, "ev_cost"),
                     state,
                     _int(payload, "created"),
@@ -604,6 +753,11 @@ class LedgerStore:
             )
         except sqlite3.IntegrityError as exc:
             raise FormatFail(f"work_order insert failed: {exc}") from exc
+        decision = payload.get("decision")
+        if decision is not None:
+            if not isinstance(decision, Mapping):
+                raise FormatFail("work_order decision must be an object")
+            self._insert_decision_row(decision, unit=unit, wo_id=work_order_id)
         return work_order_id
 
     def _op_update_work_order_state(self, payload: Mapping[str, Any]) -> bool:
@@ -619,11 +773,69 @@ class LedgerStore:
         current = str(row["state"])
         if current != state and state not in WORK_ORDER_TRANSITIONS.get(current, frozenset()):
             raise FormatFail(f"work_order transition {current} -> {state} is not allowed")
+        payload_json = _opt_text(payload, "payload_json")
         cursor = self._conn.execute(
-            "UPDATE work_order SET state=?, payload_json=COALESCE(?, payload_json) WHERE id=?",
+            "UPDATE work_order SET state=?, payload_json=COALESCE(?, payload_json), "
+            "cas_bytes=CASE WHEN ? IS NULL THEN cas_bytes ELSE ? END WHERE id=?",
             (
                 state,
-                _opt_text(payload, "payload_json"),
+                payload_json,
+                payload_json,
+                _payload_cas_bytes(payload_json),
+                work_order_id,
+            ),
+        )
+        return cursor.rowcount == 1
+
+    def _op_settle_work_order(self, payload: Mapping[str, Any]) -> bool:
+        work_order_id = _text(payload, "work_order_id")
+        state = _text(payload, "state")
+        if state not in {"done", "failed"}:
+            raise FormatFail("settle state must be done or failed")
+        decision = payload.get("decision")
+        if not isinstance(decision, Mapping):
+            raise FormatFail("work_order decision must be an object")
+        unit = decision.get("unit")
+        if unit is None:
+            row = self._conn.execute(
+                "SELECT unit FROM work_order WHERE id=?", (work_order_id,)
+            ).fetchone()
+            if row is None:
+                raise FormatFail("work_order does not exist")
+            unit = str(row["unit"])
+        payload_json = _opt_text(payload, "payload_json")
+        cursor = self._conn.execute(
+            "UPDATE work_order SET state=?, payload_json=COALESCE(?, payload_json), "
+            "cas_bytes=CASE WHEN ? IS NULL THEN cas_bytes ELSE ? END "
+            "WHERE id=? AND state='ready'",
+            (
+                state,
+                payload_json,
+                payload_json,
+                _payload_cas_bytes(payload_json),
+                work_order_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise FormatFail("work_order is not ready")
+        self._insert_decision_row(decision, unit=str(unit), wo_id=work_order_id)
+        return True
+
+    def _op_shed_work_order(self, payload: Mapping[str, Any]) -> bool:
+        work_order_id = _text(payload, "work_order_id")
+        state = _text(payload, "state")
+        if state not in {"ready", "parked", "shed"}:
+            raise FormatFail("shed state is invalid")
+        payload_json = _opt_text(payload, "payload_json")
+        cursor = self._conn.execute(
+            "UPDATE work_order SET state=?, payload_json=COALESCE(?, payload_json), "
+            "cas_bytes=CASE WHEN ? IS NULL THEN cas_bytes ELSE ? END "
+            "WHERE id=? AND state='ready'",
+            (
+                state,
+                payload_json,
+                payload_json,
+                _payload_cas_bytes(payload_json),
                 work_order_id,
             ),
         )
@@ -2061,6 +2273,60 @@ class LedgerStore:
                 "SELECT COALESCE(SUM(spent_usd_micro),0) AS n FROM decision WHERE run_id=?",
                 (run_id,),
             ).fetchone()
+        return int(row["n"])
+
+    def decision_rows(
+        self,
+        *,
+        unit: str | None = None,
+        wo_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List policy decisions in commit order for audit and failure state."""
+        if limit < 1:
+            raise FormatFail("decision_rows limit must be >= 1")
+        sql = (
+            "SELECT id, run_id, wo_id, unit, trigger_metric, observed, expected, "
+            "spent_usd_micro, created FROM decision"
+        )
+        clauses: list[str] = []
+        params: list[object] = []
+        if unit is not None:
+            clauses.append("unit=?")
+            params.append(unit)
+        if wo_id is not None:
+            clauses.append("wo_id=?")
+            params.append(wo_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def ready_work_order_count(self) -> int:
+        """Count ready work orders for the backlog shed trigger."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM work_order WHERE state='ready'"
+        ).fetchone()
+        return int(row["n"])
+
+    def ready_work_order_budget(self) -> tuple[int, int]:
+        """Return ready work-order count and summed payload CAS bytes."""
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(SUM(cas_bytes),0) AS cas
+            FROM work_order
+            WHERE state='ready'
+            """
+        ).fetchone()
+        return int(row["n"]), int(row["cas"])
+
+    def ready_work_order_cas_bytes(self) -> int:
+        """Sum policy payload cas_bytes for ready work orders."""
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(cas_bytes),0) AS n FROM work_order WHERE state='ready'"
+        ).fetchone()
         return int(row["n"])
 
     def artifact_ttl_counts(self) -> dict[str, int]:

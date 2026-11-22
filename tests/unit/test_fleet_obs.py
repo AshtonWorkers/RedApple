@@ -83,6 +83,40 @@ def test_RA_RET_001_sweep_respects_ttl_and_min_set():
     run(body())
 
 
+def test_RA_RET_001_retention_validation_and_delete_floor():
+    with pytest.raises(FormatFail):
+        RetentionPolicy(ephemeral_days=0)
+    with pytest.raises(FormatFail):
+        RetentionPolicy(batch_size=0)
+    with pytest.raises(FormatFail):
+        RetentionPolicy(batch_size=501)
+    with pytest.raises(FormatFail):
+        RetentionPolicy(min_set=-1)
+
+    async def body():
+        ledger = await Ledger.open(":memory:")
+        try:
+            old = 1
+            old_id = await ledger.put_artifact("crash", b"old-ep", ttl_class="ephemeral")
+            ledger.store._conn.execute(
+                "UPDATE artifact SET created=? WHERE id=?", (old, old_id)
+            )
+            await ledger.put_artifact("crash", b"fresh-run", ttl_class="run")
+            result = await sweep(
+                ledger,
+                RetentionPolicy(ephemeral_days=30, run_days=90, min_set=1, batch_size=1),
+                now=old + 31 * 86_400_000,
+            )
+            assert result["ephemeral"] == 1
+            assert result["batches"] == 1
+            assert result["remaining"] == 1
+            assert ledger.artifact_count() == 1
+        finally:
+            await ledger.close()
+
+    run(body())
+
+
 def test_RA_INV_001_store_invariants_clean():
     async def body():
         ledger = await Ledger.open(":memory:")

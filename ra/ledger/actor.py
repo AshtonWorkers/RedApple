@@ -65,11 +65,14 @@ class LedgerActor:
         *,
         rows: int = 1,
         telemetry: bool = False,
+        immediate: bool = False,
     ) -> object:
         """Submit one write; producers await when the bounded mailbox is full."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
-        operation = LedgerOperation(kind=kind, payload=payload, rows=rows, future=future)
+        operation = LedgerOperation(
+            kind=kind, payload=payload, rows=rows, immediate=immediate, future=future
+        )
         async with self._state_lock:
             if self._closing or self._stopped:
                 raise RaError("ledger actor is stopped", code="LEDGER_STOPPED")
@@ -97,17 +100,18 @@ class LedgerActor:
             first = await self._queue.get()
             batch = [first]
             rows = first.rows
-            deadline = time.monotonic() + (self._max_batch_ms / 1000.0)
-            while rows < self._max_batch_rows and len(batch) < self._max_batch_rows:
-                timeout = deadline - time.monotonic()
-                if timeout <= 0:
-                    break
-                try:
-                    item = await asyncio.wait_for(self._queue.get(), timeout)
-                except TimeoutError:
-                    break
-                batch.append(item)
-                rows += item.rows
+            if not first.immediate:
+                deadline = time.monotonic() + (self._max_batch_ms / 1000.0)
+                while rows < self._max_batch_rows and len(batch) < self._max_batch_rows:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    try:
+                        item = await asyncio.wait_for(self._queue.get(), timeout)
+                    except TimeoutError:
+                        break
+                    batch.append(item)
+                    rows += item.rows
             started = time.perf_counter()
             with contextlib.suppress(Exception):
                 # Futures already carry the failure; the writer stays alive.

@@ -154,13 +154,18 @@ CREATE INDEX IF NOT EXISTS ix_join_state ON "join"(state);
 CREATE TABLE IF NOT EXISTS work_order(id TEXT PRIMARY KEY, run_id TEXT REFERENCES run(id),
   action TEXT NOT NULL CHECK(action IN ('retarget','reweight','spawn_subfactory',
     'widen_dialect','force_groom','try_gadget_set','escalate_model','demote','park')),
-  unit TEXT NOT NULL, payload_json TEXT, ev_cost REAL NOT NULL CHECK(ev_cost >= 0),
-  state TEXT NOT NULL CHECK(state IN ('ready','parked','done')), created INT NOT NULL);
+  unit TEXT NOT NULL, payload_json TEXT, cas_bytes INT NOT NULL DEFAULT 0,
+  ev_cost REAL NOT NULL CHECK(ev_cost >= 0),
+  state TEXT NOT NULL CHECK(state IN ('ready','parked','done','failed','shed')),
+  created INT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_wo_state ON work_order(state, created);
+CREATE INDEX IF NOT EXISTS ix_wo_ready_cas ON work_order(state, cas_bytes);
+CREATE INDEX IF NOT EXISTS ix_wo_ready_ev ON work_order(state, ev_cost DESC, created, id);
 
-CREATE TABLE IF NOT EXISTS decision(id INTEGER PRIMARY KEY, run_id TEXT, wo_id TEXT,
+CREATE TABLE IF NOT EXISTS decision(id INTEGER PRIMARY KEY, run_id TEXT, wo_id TEXT, unit TEXT,
   trigger_metric TEXT NOT NULL, observed REAL NOT NULL, expected TEXT NOT NULL,
   spent_usd_micro INT NOT NULL CHECK(spent_usd_micro >= 0), created INT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_decision_unit ON decision(unit, created);
 
 CREATE TABLE IF NOT EXISTS idem(entity TEXT NOT NULL, entity_id TEXT NOT NULL, to_state TEXT NOT NULL,
   created INT NOT NULL, PRIMARY KEY(entity, entity_id, to_state));

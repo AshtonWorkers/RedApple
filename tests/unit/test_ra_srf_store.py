@@ -1,7 +1,10 @@
 """Store persistence tests for RA-SRF-004."""
 
 import asyncio
+import json
 import sqlite3
+
+import pytest
 
 from ra.ledger import Ledger
 from ra.srf.store import (
@@ -109,3 +112,16 @@ def test_RA_SRF_004_rows_to_json_and_ledger_payload_mapping():
         "ring_node": "ring",
     }
     assert "id" not in payload
+
+
+def test_RA_SRF_004_rows_to_json_sorts_keys() -> None:
+    assert json.loads(rows_to_json([{"b": 1, "a": 2}])) == [{"a": 2, "b": 1}]
+
+
+def test_RA_SRF_cli_help(capsys: pytest.CaptureFixture[str]) -> None:
+    from ra.srf.__main__ import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "--cache" in capsys.readouterr().out
