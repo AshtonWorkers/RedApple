@@ -312,14 +312,217 @@ class Ledger:
         result = await self._submit("upsert_device_profile", dict(payload))
         return cast(str, result)
 
-    async def advance_ring(self, epoch: int, node_payloads: Sequence[Mapping[str, Any]]) -> int:
-        """Atomically advance the version ring (RA-RING-004)."""
+    async def advance_ring(
+        self,
+        epoch: int,
+        node_payloads: Sequence[Mapping[str, Any]],
+        *,
+        history_capacity: int | None = None,
+        created: int | None = None,
+    ) -> int:
+        """Atomically advance the version ring to an explicit epoch (RA-RING-004)."""
+        payload: dict[str, Any] = {
+            "epoch": epoch,
+            "nodes": [dict(node) for node in node_payloads],
+        }
+        if history_capacity is not None:
+            payload["history_capacity"] = history_capacity
+        if created is not None:
+            payload["created"] = created
+        result = await self._submit("advance_ring", payload, rows=len(node_payloads) + 1)
+        return cast(int, result)
+
+    async def advance_ring_auto(
+        self,
+        node_payloads: Sequence[Mapping[str, Any]],
+        *,
+        history_capacity: int | None = None,
+        created: int | None = None,
+    ) -> int:
+        """Advance the ring to the next epoch computed inside the ledger transaction."""
+        payload: dict[str, Any] = {"nodes": [dict(node) for node in node_payloads]}
+        if history_capacity is not None:
+            payload["history_capacity"] = history_capacity
+        if created is not None:
+            payload["created"] = created
+        result = await self._submit("advance_ring_auto", payload, rows=len(node_payloads) + 1)
+        return cast(int, result)
+
+    async def attach_ring_node(
+        self,
+        node_payload: Mapping[str, Any],
+        *,
+        history_capacity: int | None = None,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        """Attach one node to the current ring version."""
+        payload: dict[str, Any] = {"node": dict(node_payload)}
+        if history_capacity is not None:
+            payload["history_capacity"] = history_capacity
+        if created is not None:
+            payload["created"] = created
+        result = await self._submit("attach_ring_node", payload, rows=16)
+        return cast(dict[str, Any], result)
+
+    async def promote_ring_node(
+        self,
+        ring_node_id: str,
+        *,
+        history_capacity: int | None = None,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        """Promote one active ring node to current in a new ring version."""
+        payload: dict[str, Any] = {"ring_node_id": ring_node_id}
+        if history_capacity is not None:
+            payload["history_capacity"] = history_capacity
+        if created is not None:
+            payload["created"] = created
+        result = await self._submit("promote_ring_node", payload, rows=16)
+        return cast(dict[str, Any], result)
+
+    async def rollback_ring(
+        self,
+        epoch: int,
+        *,
+        history_capacity: int | None = None,
+        created: int | None = None,
+    ) -> dict[str, Any]:
+        """Roll the ring back to a retained version snapshot as a new epoch."""
+        payload: dict[str, Any] = {"epoch": epoch}
+        if history_capacity is not None:
+            payload["history_capacity"] = history_capacity
+        if created is not None:
+            payload["created"] = created
+        result = await self._submit("rollback_ring", payload, rows=16)
+        return cast(dict[str, Any], result)
+
+    async def record_ring_boot_failure(
+        self, ring_node_id: str, *, threshold: int = 2, updated: int | None = None
+    ) -> dict[str, Any]:
+        """Record one boot failure and mark the node bad at the threshold."""
         result = await self._submit(
-            "advance_ring",
-            {"epoch": epoch, "nodes": [dict(node) for node in node_payloads]},
-            rows=len(node_payloads) + 1,
+            "record_ring_boot_failure",
+            {
+                "ring_node_id": ring_node_id,
+                "threshold": threshold,
+                "updated": now_ms() if updated is None else updated,
+            },
+            rows=2,
+        )
+        return cast(dict[str, Any], result)
+
+    async def record_ring_ingest(
+        self,
+        *,
+        kind: str,
+        uri: str,
+        sha256: str,
+        size_bytes: int,
+        epoch: int,
+        artifact_id: str | None = None,
+        ingest_id: str | None = None,
+        created: int | None = None,
+    ) -> str:
+        """Record one hash-verified ring ingest source."""
+        rid = ingest_id or self._ids.new("ring_ingest")
+        result = await self._submit(
+            "record_ring_ingest",
+            {
+                "ingest_id": rid,
+                "kind": kind,
+                "uri": uri,
+                "sha256": sha256,
+                "bytes": size_bytes,
+                "artifact_id": artifact_id,
+                "epoch": epoch,
+                "created": now_ms() if created is None else created,
+            },
+            rows=1,
+        )
+        return cast(str, result)
+
+    async def register_ring_corpus(
+        self,
+        *,
+        corpus_key: str,
+        ring_node_id: str,
+        epoch: int,
+        artifact_id: str | None = None,
+        corpus_id: str | None = None,
+        created: int | None = None,
+        updated: int | None = None,
+    ) -> str:
+        """Register or reactivate an epoch-keyed corpus binding for a ring node."""
+        cid = corpus_id or self._ids.new("ring_corpus")
+        when = now_ms()
+        result = await self._submit(
+            "register_ring_corpus",
+            {
+                "corpus_id": cid,
+                "corpus_key": corpus_key,
+                "ring_node_id": ring_node_id,
+                "epoch": epoch,
+                "artifact_id": artifact_id,
+                "created": when if created is None else created,
+                "updated": when if updated is None else updated,
+            },
+            rows=1,
+        )
+        return cast(str, result)
+
+    async def revoke_ring_corpus(
+        self,
+        *,
+        corpus_key: str | None = None,
+        ring_node_id: str | None = None,
+        epoch: int | None = None,
+        updated: int | None = None,
+    ) -> int:
+        """Revoke active corpus bindings matching the given ring scope."""
+        result = await self._submit(
+            "revoke_ring_corpus",
+            {
+                "corpus_key": corpus_key,
+                "ring_node_id": ring_node_id,
+                "epoch": epoch,
+                "updated": now_ms() if updated is None else updated,
+            },
+            rows=64,
         )
         return cast(int, result)
+
+    async def record_ring_replay(
+        self,
+        *,
+        run_id: str,
+        epoch: int,
+        ring_node_id: str,
+        corpus_key: str,
+        finding_id: str,
+        status: str,
+        detail: Mapping[str, Any],
+        replay_id: str | None = None,
+        created: int | None = None,
+    ) -> str:
+        """Record one nightly whole-ring replay result idempotently."""
+        rid = replay_id or self._ids.new("ring_replay")
+        detail_json = json.dumps(dict(detail), sort_keys=True, separators=(",", ":"))
+        result = await self._submit(
+            "record_ring_replay",
+            {
+                "replay_id": rid,
+                "run_id": run_id,
+                "epoch": epoch,
+                "ring_node_id": ring_node_id,
+                "corpus_key": corpus_key,
+                "finding_id": finding_id,
+                "status": status,
+                "detail_json": detail_json,
+                "created": now_ms() if created is None else created,
+            },
+            rows=1,
+        )
+        return cast(str, result)
 
     async def delete_artifacts(
         self, artifact_ids: Sequence[str], *, min_set: int = 0
@@ -728,6 +931,69 @@ class Ledger:
     def ring_node(self, node_id: str) -> dict[str, Any] | None:
         """Fetch one ring node."""
         return self.store.ring_node(node_id)
+
+    def ring_versions(self) -> list[dict[str, Any]]:
+        """List retained ring version snapshots."""
+        return self.store.ring_versions()
+
+    def ring_version(self, epoch: int) -> dict[str, Any] | None:
+        """Fetch one retained ring version snapshot."""
+        return self.store.ring_version(epoch)
+
+    def ring_ingests(
+        self, *, epoch: int | None = None, kind: str | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        """List ring ingest records."""
+        return self.store.ring_ingests(epoch=epoch, kind=kind, limit=limit)
+
+    def ring_ingest(self, ingest_id: str) -> dict[str, Any] | None:
+        """Fetch one ring ingest record."""
+        return self.store.ring_ingest(ingest_id)
+
+    def ring_corpora(
+        self,
+        *,
+        corpus_key: str | None = None,
+        ring_node_id: str | None = None,
+        state: str | None = None,
+        epoch: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List ring corpus bindings."""
+        return self.store.ring_corpora(
+            corpus_key=corpus_key, ring_node_id=ring_node_id, state=state, epoch=epoch
+        )
+
+    def ring_corpus(self, corpus_id: str) -> dict[str, Any] | None:
+        """Fetch one ring corpus binding."""
+        return self.store.ring_corpus(corpus_id)
+
+    def ring_replays(
+        self,
+        *,
+        run_id: str | None = None,
+        epoch: int | None = None,
+        ring_node_id: str | None = None,
+        corpus_key: str | None = None,
+        finding_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List ring replay records."""
+        return self.store.ring_replays(
+            run_id=run_id,
+            epoch=epoch,
+            ring_node_id=ring_node_id,
+            corpus_key=corpus_key,
+            finding_id=finding_id,
+            limit=limit,
+        )
+
+    def ring_replay(self, replay_id: str) -> dict[str, Any] | None:
+        """Fetch one ring replay record."""
+        return self.store.ring_replay(replay_id)
+
+    def ring_health(self, ring_node_id: str) -> dict[str, Any] | None:
+        """Fetch ring health counters for one node."""
+        return self.store.ring_health(ring_node_id)
 
     def entry_points(self, ring_node: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Entry points for one ring node in rank order."""

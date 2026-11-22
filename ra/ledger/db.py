@@ -21,7 +21,7 @@ from ..errors import AdapterShipBlocked, DuplicateDedup, FormatFail, RaError
 from .ids import UlidFactory  # noqa: F401  (re-exported for callers)
 from .models import ClaimInput
 from .operations import LedgerOperation
-from .schema import MEMORY_SCHEMA_SQL, SCHEMA_SQL
+from .schema import MEMORY_SCHEMA_SQL, RING_SCHEMA_SQL, SCHEMA_SQL
 from .states import ClaimState, can_transition
 
 CLAIM_TYPES = frozenset(
@@ -60,6 +60,25 @@ RING_NODE_STATES = frozenset({"active", "current", "bad", "retired"})
 DEVICE_STATES = frozenset({"attached", "needs_hand", "ready", "failed"})
 DEVICE_THERMAL_STATES = frozenset({"nominal", "serious", "critical"})
 _MISSING: Any = object()
+RING_INGEST_KINDS = frozenset({"ipsw", "oss_tarball", "webkit", "security_notes"})
+RING_CORPUS_STATES = frozenset({"active", "revoked"})
+RING_REPLAY_STATUSES = frozenset({"pass", "fail", "error", "skipped"})
+RING_MIN_PINNED_NODES = 6
+RING_MIN_CURRENT_NODES = 2
+RING_HISTORY_CAPACITY_MIN = 2
+RING_HISTORY_CAPACITY_MAX = 1024
+RING_DEFAULT_HISTORY_CAPACITY = 8
+RING_VERSION_ORIGINS = frozenset({"advance", "attach", "promote", "rollback"})
+_RING_NODE_KEYS = (
+    "ring_node_id",
+    "ipsw_sha",
+    "build",
+    "xcode",
+    "sdk",
+    "webkit_commit",
+    "state",
+    "epoch",
+)
 
 
 def _text(payload: Mapping[str, Any], key: str) -> str:
@@ -82,6 +101,15 @@ def _int(payload: Mapping[str, Any], key: str) -> int:
     value = payload[key]
     if isinstance(value, bool) or not isinstance(value, int):
         raise FormatFail(f"ledger payload {key} must be int")
+    return value
+
+
+def _opt_int(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FormatFail(f"ledger payload {key} must be int or None")
     return value
 
 
@@ -219,6 +247,22 @@ def _score(payload: Mapping[str, Any], key: str) -> float:
     return value
 
 
+def _mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise FormatFail(f"ledger payload {key} must be object")
+    return value
+
+
+def _ring_history_capacity(payload: Mapping[str, Any]) -> int:
+    value = payload.get("history_capacity", RING_DEFAULT_HISTORY_CAPACITY)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FormatFail("ring history_capacity must be int")
+    if not RING_HISTORY_CAPACITY_MIN <= value <= RING_HISTORY_CAPACITY_MAX:
+        raise FormatFail("ring history_capacity is out of range")
+    return value
+
+
 class LedgerStore:
     """Synchronous SQLite store used only by the ledger actor.
 
@@ -275,6 +319,7 @@ class LedgerStore:
             self._conn.executescript(SCHEMA_SQL)
         else:
             self._conn.executescript(MEMORY_SCHEMA_SQL)
+        self._conn.executescript(RING_SCHEMA_SQL)
 
     def close(self) -> None:
         """Close the SQLite connection."""
@@ -660,14 +705,45 @@ class LedgerStore:
         )
         return packet_id
 
-    def _op_upsert_ring_node(self, payload: Mapping[str, Any]) -> str:
+    @staticmethod
+    def _ring_node_values(
+        payload: Mapping[str, Any], *, epoch: int | None = None
+    ) -> tuple[str, str, str, str, str, str, str, int]:
         node_id = _text(payload, "ring_node_id")
         state = _text(payload, "state")
-        epoch = _int(payload, "epoch")
         if state not in RING_NODE_STATES:
             raise FormatFail("ring node state is invalid")
-        if epoch < 0:
+        node_epoch = _int(payload, "epoch") if epoch is None else epoch
+        if node_epoch < 0:
             raise FormatFail("ring node epoch must be non-negative")
+        fields = {
+            "ipsw_sha": _text(payload, "ipsw_sha"),
+            "build": _text(payload, "build"),
+            "xcode": _text(payload, "xcode"),
+            "sdk": _text(payload, "sdk"),
+            "webkit_commit": _text(payload, "webkit_commit"),
+        }
+        for name, value in fields.items():
+            if not value:
+                raise FormatFail(f"ring node {name} must be non-empty")
+        return (
+            node_id,
+            fields["ipsw_sha"],
+            fields["build"],
+            fields["xcode"],
+            fields["sdk"],
+            fields["webkit_commit"],
+            state,
+            node_epoch,
+        )
+
+    def _upsert_ring_node_row(self, payload: Mapping[str, Any], *, epoch: int | None = None) -> str:
+        values = list(self._ring_node_values(payload, epoch=epoch))
+        existing = self._conn.execute(
+            "SELECT state FROM ring_node WHERE id=?", (values[0],)
+        ).fetchone()
+        if existing is not None and str(existing["state"]) == "bad" and values[6] != "bad":
+            values[6] = "bad"
         self._conn.execute(
             """
             INSERT INTO ring_node(id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch)
@@ -676,40 +752,490 @@ class LedgerStore:
               xcode=excluded.xcode, sdk=excluded.sdk, webkit_commit=excluded.webkit_commit,
               state=excluded.state, epoch=excluded.epoch
             """,
-            (
-                node_id,
-                _text(payload, "ipsw_sha"),
-                _text(payload, "build"),
-                _text(payload, "xcode"),
-                _text(payload, "sdk"),
-                _text(payload, "webkit_commit"),
-                state,
-                epoch,
-            ),
+            tuple(values),
         )
-        return node_id
+        return str(values[0])
+
+    def _op_upsert_ring_node(self, payload: Mapping[str, Any]) -> str:
+        return self._upsert_ring_node_row(payload)
+
+    def _ring_current_epoch(self) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(epoch), 0) AS epoch FROM ring_node"
+        ).fetchone()
+        version_row = self._conn.execute(
+            "SELECT COALESCE(MAX(epoch), 0) AS epoch FROM ring_version"
+        ).fetchone()
+        return max(int(row["epoch"]), int(version_row["epoch"]))
+
+    def _clean_ring_nodes(
+        self, nodes: Sequence[Mapping[str, Any]], *, epoch: int
+    ) -> list[dict[str, Any]]:
+        if not nodes:
+            raise FormatFail("ring version requires at least one node")
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for node in nodes:
+            values = self._ring_node_values(node, epoch=epoch)
+            node_id = values[0]
+            if node_id in seen:
+                raise FormatFail("ring node ids must be unique")
+            seen.add(node_id)
+            if values[6] == "retired":
+                raise FormatFail("ring version nodes cannot be retired")
+            out.append(dict(zip(_RING_NODE_KEYS, values, strict=True)))
+        return out
+
+    def _apply_bad_quarantine(self, nodes: list[dict[str, Any]]) -> None:
+        for node in nodes:
+            node_id = str(node["ring_node_id"])
+            row = self._conn.execute(
+                "SELECT state FROM ring_node WHERE id=?", (node_id,)
+            ).fetchone()
+            existing = None if row is None else str(row["state"])
+            state = str(node["state"])
+            if existing == "bad":
+                if state != "bad":
+                    node["state"] = "bad"
+            elif state == "bad":
+                raise FormatFail(f"ring node {node_id} cannot be marked bad by ring version")
+
+    def _validate_ring_snapshot(self, nodes: Sequence[Mapping[str, Any]]) -> None:
+        if len(nodes) < RING_MIN_PINNED_NODES:
+            raise FormatFail(f"ring requires at least {RING_MIN_PINNED_NODES} pinned nodes")
+        current = sum(1 for node in nodes if node["state"] == "current")
+        if current < RING_MIN_CURRENT_NODES:
+            raise FormatFail(f"ring requires at least {RING_MIN_CURRENT_NODES} current nodes")
+
+    def _write_ring_version(
+        self,
+        epoch: int,
+        nodes: Sequence[Mapping[str, Any]],
+        *,
+        created: int | None = None,
+        origin: str = "advance",
+        restored_from_epoch: int | None = None,
+        history_capacity: int = RING_DEFAULT_HISTORY_CAPACITY,
+    ) -> int:
+        if origin not in RING_VERSION_ORIGINS:
+            raise FormatFail("ring version origin is invalid")
+        current_epoch = self._ring_current_epoch()
+        if epoch <= current_epoch:
+            raise FormatFail("ring epoch must increase")
+        clean = self._clean_ring_nodes(nodes, epoch=epoch)
+        self._apply_bad_quarantine(clean)
+        self._validate_ring_snapshot(clean)
+        nodes_json = json.dumps(clean, sort_keys=True, separators=(",", ":"))
+        self._conn.execute(
+            """
+            INSERT INTO ring_version(epoch, nodes_json, node_count, created, origin, restored_from_epoch)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (epoch, nodes_json, len(clean), 0 if created is None else created, origin, restored_from_epoch),
+        )
+        ids: list[str] = []
+        for node in clean:
+            node_id = self._upsert_ring_node_row(node, epoch=epoch)
+            ids.append(node_id)
+        placeholders = ",".join("?" for _ in ids)
+        self._conn.execute(
+            f"UPDATE ring_node SET state='retired' WHERE epoch < ? AND state <> 'bad' "
+            f"AND id NOT IN ({placeholders})",
+            (epoch, *ids),
+        )
+        self._evict_ring_versions(history_capacity)
+        return epoch
+
+    def _evict_ring_versions(self, history_capacity: int) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT epoch FROM ring_version ORDER BY epoch DESC"
+        ).fetchall()
+        evicted = [int(row["epoch"]) for row in rows[history_capacity:]]
+        for epoch in evicted:
+            self._conn.execute("DELETE FROM ring_version WHERE epoch=?", (epoch,))
+        return evicted
+
+    def _advance_ring(
+        self,
+        epoch: int,
+        nodes: Sequence[Mapping[str, Any]],
+        *,
+        history_capacity: int = RING_DEFAULT_HISTORY_CAPACITY,
+        created: int | None = None,
+    ) -> int:
+        return self._write_ring_version(
+            epoch,
+            nodes,
+            created=created,
+            origin="advance",
+            history_capacity=history_capacity,
+        )
 
     def _op_advance_ring(self, payload: Mapping[str, Any]) -> int:
+        return self._advance_ring(
+            _int(payload, "epoch"),
+            _list(payload, "nodes"),
+            history_capacity=_ring_history_capacity(payload),
+            created=_opt_int(payload, "created"),
+        )
+
+    def _op_advance_ring_auto(self, payload: Mapping[str, Any]) -> int:
+        return self._advance_ring(
+            self._ring_current_epoch() + 1,
+            _list(payload, "nodes"),
+            history_capacity=_ring_history_capacity(payload),
+            created=_opt_int(payload, "created"),
+        )
+
+    def _ring_version_row(self, epoch: int) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self._conn.execute(
+                "SELECT epoch, nodes_json, node_count, created, origin, restored_from_epoch "
+                "FROM ring_version WHERE epoch=?",
+                (epoch,),
+            ).fetchone(),
+        )
+
+    def _latest_ring_version_row(self) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self._conn.execute(
+                "SELECT epoch, nodes_json, node_count, created, origin, restored_from_epoch "
+                "FROM ring_version ORDER BY epoch DESC LIMIT 1"
+            ).fetchone(),
+        )
+
+    def _ring_version_epochs(self) -> list[int]:
+        rows = self._conn.execute("SELECT epoch FROM ring_version ORDER BY epoch").fetchall()
+        return [int(row["epoch"]) for row in rows]
+
+    def _decode_ring_version_nodes(self, row: sqlite3.Row) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(str(row["nodes_json"]))
+        except json.JSONDecodeError as exc:
+            raise RaError("ring version snapshot is corrupt") from exc
+        if not isinstance(data, list):
+            raise RaError("ring version snapshot is corrupt")
+        out: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise RaError("ring version snapshot is corrupt")
+            values = self._ring_node_values({key: item.get(key) for key in _RING_NODE_KEYS})
+            out.append(dict(zip(_RING_NODE_KEYS, values, strict=True)))
+        return out
+
+    def _current_snapshot_nodes(self) -> tuple[int, list[dict[str, Any]]]:
+        row = self._latest_ring_version_row()
+        if row is not None:
+            return int(row["epoch"]), self._decode_ring_version_nodes(row)
+        epoch = self._ring_current_epoch()
+        rows = self._conn.execute(
+            "SELECT id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch "
+            "FROM ring_node WHERE epoch=? AND state IN ('active','current','bad') ORDER BY id",
+            (epoch,),
+        ).fetchall()
+        nodes: list[dict[str, Any]] = []
+        for row in rows:
+            values = self._ring_node_values(
+                {
+                    "ring_node_id": row["id"],
+                    "ipsw_sha": row["ipsw_sha"],
+                    "build": row["build"],
+                    "xcode": row["xcode"],
+                    "sdk": row["sdk"],
+                    "webkit_commit": row["webkit_commit"],
+                    "state": row["state"],
+                    "epoch": row["epoch"],
+                }
+            )
+            nodes.append(dict(zip(_RING_NODE_KEYS, values, strict=True)))
+        return epoch, nodes
+
+    def _op_attach_ring_node(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        node = _mapping(payload, "node")
+        epoch, nodes = self._current_snapshot_nodes()
+        if not nodes:
+            raise FormatFail("cannot attach before initial ring advance")
+        node_id = _text(node, "ring_node_id")
+        if any(str(item["ring_node_id"]) == node_id for item in nodes):
+            raise FormatFail(f"ring node {node_id} already exists")
+        state = _text(node, "state")
+        if state not in {"active", "current"}:
+            raise FormatFail("attached ring node must be active or current")
+        new_node = dict(node)
+        new_node["state"] = state
+        new_node["epoch"] = epoch
+        new_epoch = self._write_ring_version(
+            self._ring_current_epoch() + 1,
+            [*nodes, new_node],
+            created=_opt_int(payload, "created"),
+            origin="attach",
+            history_capacity=_ring_history_capacity(payload),
+        )
+        return {
+            "epoch": new_epoch,
+            "node_id": node_id,
+            "state": state,
+            "node_count": len(nodes) + 1,
+        }
+
+    def _op_promote_ring_node(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        node_id = _text(payload, "ring_node_id")
+        _, nodes = self._current_snapshot_nodes()
+        if not nodes:
+            raise FormatFail("cannot promote before initial ring advance")
+        index = next(
+            (i for i, node in enumerate(nodes) if str(node["ring_node_id"]) == node_id),
+            None,
+        )
+        if index is None:
+            raise FormatFail(f"unknown ring node {node_id}")
+        state = str(nodes[index]["state"])
+        if state == "bad":
+            raise FormatFail(f"ring node {node_id} is bad")
+        if state == "current":
+            return {
+                "epoch": self._ring_current_epoch(),
+                "node_id": node_id,
+                "state": "current",
+                "changed": False,
+                "node_count": len(nodes),
+            }
+        promoted = [dict(node) for node in nodes]
+        promoted[index]["state"] = "current"
+        new_epoch = self._write_ring_version(
+            self._ring_current_epoch() + 1,
+            promoted,
+            created=_opt_int(payload, "created"),
+            origin="promote",
+            history_capacity=_ring_history_capacity(payload),
+        )
+        return {
+            "epoch": new_epoch,
+            "node_id": node_id,
+            "state": "current",
+            "changed": True,
+            "node_count": len(promoted),
+        }
+
+    def _op_rollback_ring(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        target = _int(payload, "epoch")
+        if target < 0:
+            raise FormatFail("ring rollback epoch must be non-negative")
+        epochs = self._ring_version_epochs()
+        if not epochs:
+            raise FormatFail("ring has no versions to roll back")
+        if target not in epochs:
+            if target < min(epochs):
+                raise FormatFail("rollback target is older than retained ring history")
+            raise FormatFail(f"unknown ring version epoch {target}")
+        row = self._ring_version_row(target)
+        if row is None:
+            raise RaError("ring version snapshot is missing")
+        nodes = self._decode_ring_version_nodes(row)
+        current_epoch = self._ring_current_epoch()
+        if target == current_epoch:
+            return {
+                "epoch": current_epoch,
+                "restored_from_epoch": target,
+                "changed": False,
+                "node_count": len(nodes),
+            }
+        new_epoch = self._write_ring_version(
+            current_epoch + 1,
+            nodes,
+            created=_opt_int(payload, "created"),
+            origin="rollback",
+            restored_from_epoch=target,
+            history_capacity=_ring_history_capacity(payload),
+        )
+        return {
+            "epoch": new_epoch,
+            "restored_from_epoch": target,
+            "changed": True,
+            "node_count": len(nodes),
+        }
+
+    def _op_record_ring_boot_failure(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        node_id = _text(payload, "ring_node_id")
+        threshold = _int(payload, "threshold")
+        if threshold <= 0:
+            raise FormatFail("ring boot failure threshold must be positive")
+        node = self.ring_node(node_id)
+        if node is None:
+            raise FormatFail(f"unknown ring node {node_id}")
+        row = self._conn.execute(
+            "SELECT failures, bad_marked FROM ring_health WHERE ring_node_id=?",
+            (node_id,),
+        ).fetchone()
+        failures = int(row["failures"]) if row is not None else 0
+        bad_marked = int(row["bad_marked"]) if row is not None else 0
+        failures += 1
+        state = str(node["state"])
+        alert = False
+        if failures >= threshold and state != "bad":
+            self._conn.execute("UPDATE ring_node SET state='bad' WHERE id=?", (node_id,))
+            bad_marked = 1
+            state = "bad"
+            alert = True
+        self._conn.execute(
+            """
+            INSERT INTO ring_health(ring_node_id, failures, bad_marked, updated)
+            VALUES(?,?,?,?)
+            ON CONFLICT(ring_node_id) DO UPDATE SET failures=excluded.failures,
+              bad_marked=excluded.bad_marked, updated=excluded.updated
+            """,
+            (node_id, failures, bad_marked, _int(payload, "updated")),
+        )
+        return {
+            "node_id": node_id,
+            "failures": failures,
+            "state": state,
+            "bad_marked": bool(bad_marked),
+            "alert": alert,
+        }
+
+    def _op_record_ring_ingest(self, payload: Mapping[str, Any]) -> str:
+        kind = _text(payload, "kind")
+        if kind not in RING_INGEST_KINDS:
+            raise FormatFail("ring ingest kind is invalid")
+        sha256 = _text(payload, "sha256")
+        if len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256):
+            raise FormatFail("ring ingest sha256 must be lowercase hex")
+        size_bytes = _int(payload, "bytes")
+        if size_bytes < 0:
+            raise FormatFail("ring ingest bytes must be non-negative")
         epoch = _int(payload, "epoch")
         if epoch < 0:
-            raise FormatFail("ring epoch must be non-negative")
-        current = self._conn.execute("SELECT COALESCE(MAX(epoch), -1) AS epoch FROM ring_node").fetchone()
-        if epoch <= int(current["epoch"]):
-            raise FormatFail("ring epoch must increase")
-        nodes = _list(payload, "nodes")
-        ids: list[str] = []
-        for node in nodes:
-            ids.append(_text(node, "ring_node_id"))
-            self._op_upsert_ring_node(node)
-        if ids:
-            placeholders = ",".join("?" for _ in ids)
-            self._conn.execute(
-                f"UPDATE ring_node SET state='retired' WHERE epoch < ? AND id NOT IN ({placeholders})",
-                (epoch, *ids),
-            )
-        else:
-            self._conn.execute("UPDATE ring_node SET state='retired' WHERE epoch < ?", (epoch,))
-        return epoch
+            raise FormatFail("ring ingest epoch must be non-negative")
+        self._conn.execute(
+            """
+            INSERT INTO ring_ingest(id, kind, uri, sha256, bytes, artifact_id, epoch, created)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(kind, sha256, epoch) DO NOTHING
+            """,
+            (
+                _text(payload, "ingest_id"),
+                kind,
+                _text(payload, "uri"),
+                sha256,
+                size_bytes,
+                _opt_text(payload, "artifact_id"),
+                epoch,
+                _int(payload, "created"),
+            ),
+        )
+        row = self._conn.execute(
+            "SELECT id FROM ring_ingest WHERE kind=? AND sha256=? AND epoch=?",
+            (kind, sha256, epoch),
+        ).fetchone()
+        if row is None:
+            raise RaError("ring ingest registration failed")
+        return str(row["id"])
+
+    def _op_register_ring_corpus(self, payload: Mapping[str, Any]) -> str:
+        corpus_key = _text(payload, "corpus_key")
+        if not corpus_key:
+            raise FormatFail("ring corpus key must be non-empty")
+        ring_node_id = _text(payload, "ring_node_id")
+        if self.ring_node(ring_node_id) is None:
+            raise FormatFail(f"unknown ring node {ring_node_id}")
+        epoch = _int(payload, "epoch")
+        if epoch < 0:
+            raise FormatFail("ring corpus epoch must be non-negative")
+        self._conn.execute(
+            """
+            INSERT INTO ring_corpus(id, corpus_key, ring_node_id, epoch, state, artifact_id, created, updated)
+            VALUES(?,?,?,?,'active',?,?,?)
+            ON CONFLICT(corpus_key, ring_node_id, epoch) DO UPDATE SET
+              state='active', artifact_id=COALESCE(excluded.artifact_id, ring_corpus.artifact_id),
+              updated=excluded.updated
+            """,
+            (
+                _text(payload, "corpus_id"),
+                corpus_key,
+                ring_node_id,
+                epoch,
+                _opt_text(payload, "artifact_id"),
+                _int(payload, "created"),
+                _int(payload, "updated"),
+            ),
+        )
+        row = self._conn.execute(
+            "SELECT id FROM ring_corpus WHERE corpus_key=? AND ring_node_id=? AND epoch=?",
+            (corpus_key, ring_node_id, epoch),
+        ).fetchone()
+        if row is None:
+            raise RaError("ring corpus registration failed")
+        return str(row["id"])
+
+    def _op_revoke_ring_corpus(self, payload: Mapping[str, Any]) -> int:
+        corpus_key = _opt_text(payload, "corpus_key")
+        ring_node_id = _opt_text(payload, "ring_node_id")
+        epoch = _opt_int(payload, "epoch")
+        if corpus_key is None and ring_node_id is None and epoch is None:
+            raise FormatFail("ring corpus revocation requires a filter")
+        if epoch is not None and epoch < 0:
+            raise FormatFail("ring corpus epoch must be non-negative")
+        sql = "UPDATE ring_corpus SET state='revoked', updated=? WHERE state='active'"
+        params: list[object] = [_int(payload, "updated")]
+        if corpus_key is not None:
+            sql += " AND corpus_key=?"
+            params.append(corpus_key)
+        if ring_node_id is not None:
+            sql += " AND ring_node_id=?"
+            params.append(ring_node_id)
+        if epoch is not None:
+            sql += " AND epoch=?"
+            params.append(epoch)
+        cursor = self._conn.execute(sql, tuple(params))
+        return int(cursor.rowcount)
+
+    def _op_record_ring_replay(self, payload: Mapping[str, Any]) -> str:
+        status = _text(payload, "status")
+        if status not in RING_REPLAY_STATUSES:
+            raise FormatFail("ring replay status is invalid")
+        detail_json = _text(payload, "detail_json")
+        try:
+            json.loads(detail_json)
+        except json.JSONDecodeError as exc:
+            raise FormatFail("ring replay detail_json must be valid JSON") from exc
+        epoch = _int(payload, "epoch")
+        if epoch < 0:
+            raise FormatFail("ring replay epoch must be non-negative")
+        ring_node_id = _text(payload, "ring_node_id")
+        if self.ring_node(ring_node_id) is None:
+            raise FormatFail(f"unknown ring node {ring_node_id}")
+        corpus_key = _text(payload, "corpus_key")
+        finding_id = _text(payload, "finding_id")
+        if not corpus_key or not finding_id:
+            raise FormatFail("ring replay corpus_key and finding_id must be non-empty")
+        self._conn.execute(
+            """
+            INSERT INTO ring_replay(id, run_id, epoch, ring_node_id, corpus_key, finding_id, status, detail_json, created)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(run_id, ring_node_id, corpus_key, finding_id) DO NOTHING
+            """,
+            (
+                _text(payload, "replay_id"),
+                _text(payload, "run_id"),
+                epoch,
+                ring_node_id,
+                corpus_key,
+                finding_id,
+                status,
+                detail_json,
+                _int(payload, "created"),
+            ),
+        )
+        row = self._conn.execute(
+            "SELECT id FROM ring_replay WHERE run_id=? AND ring_node_id=? AND corpus_key=? AND finding_id=?",
+            (_text(payload, "run_id"), ring_node_id, corpus_key, finding_id),
+        ).fetchone()
+        if row is None:
+            raise RaError("ring replay registration failed")
+        return str(row["id"])
 
     def _op_upsert_device_profile(self, payload: Mapping[str, Any]) -> str:
         udid = _text(payload, "udid")
@@ -1552,6 +2078,151 @@ class LedgerStore:
             "SELECT id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch "
             "FROM ring_node WHERE id=?",
             (node_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def _ring_version_public(self, row: sqlite3.Row) -> dict[str, Any]:
+        restored = row["restored_from_epoch"]
+        return {
+            "epoch": int(row["epoch"]),
+            "nodes": self._decode_ring_version_nodes(row),
+            "node_count": int(row["node_count"]),
+            "created": int(row["created"]),
+            "origin": str(row["origin"]),
+            "restored_from_epoch": None if restored is None else int(restored),
+        }
+
+    def ring_versions(self) -> list[dict[str, Any]]:
+        """List retained ring version snapshots in epoch order."""
+        rows = self._conn.execute(
+            "SELECT epoch, nodes_json, node_count, created, origin, restored_from_epoch "
+            "FROM ring_version ORDER BY epoch"
+        ).fetchall()
+        return [self._ring_version_public(row) for row in rows]
+
+    def ring_version(self, epoch: int) -> dict[str, Any] | None:
+        """Fetch one retained ring version snapshot."""
+        row = self._ring_version_row(epoch)
+        return None if row is None else self._ring_version_public(row)
+
+    def ring_ingests(
+        self, *, epoch: int | None = None, kind: str | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        """List ring ingest records in deterministic order."""
+        sql = (
+            "SELECT id, kind, uri, sha256, bytes, artifact_id, epoch, created "
+            "FROM ring_ingest WHERE 1=1"
+        )
+        params: list[object] = []
+        if epoch is not None:
+            sql += " AND epoch=?"
+            params.append(epoch)
+        if kind is not None:
+            sql += " AND kind=?"
+            params.append(kind)
+        sql += " ORDER BY epoch, created, id LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def ring_ingest(self, ingest_id: str) -> dict[str, Any] | None:
+        """Fetch one ring ingest record."""
+        row = self._conn.execute(
+            "SELECT id, kind, uri, sha256, bytes, artifact_id, epoch, created "
+            "FROM ring_ingest WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def ring_corpora(
+        self,
+        *,
+        corpus_key: str | None = None,
+        ring_node_id: str | None = None,
+        state: str | None = None,
+        epoch: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List ring corpus bindings in deterministic order."""
+        sql = (
+            "SELECT id, corpus_key, ring_node_id, epoch, state, artifact_id, created, updated "
+            "FROM ring_corpus WHERE 1=1"
+        )
+        params: list[object] = []
+        if corpus_key is not None:
+            sql += " AND corpus_key=?"
+            params.append(corpus_key)
+        if ring_node_id is not None:
+            sql += " AND ring_node_id=?"
+            params.append(ring_node_id)
+        if state is not None:
+            sql += " AND state=?"
+            params.append(state)
+        if epoch is not None:
+            sql += " AND epoch=?"
+            params.append(epoch)
+        sql += " ORDER BY corpus_key, ring_node_id, epoch, id"
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def ring_corpus(self, corpus_id: str) -> dict[str, Any] | None:
+        """Fetch one ring corpus binding."""
+        row = self._conn.execute(
+            "SELECT id, corpus_key, ring_node_id, epoch, state, artifact_id, created, updated "
+            "FROM ring_corpus WHERE id=?",
+            (corpus_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def ring_replays(
+        self,
+        *,
+        run_id: str | None = None,
+        epoch: int | None = None,
+        ring_node_id: str | None = None,
+        corpus_key: str | None = None,
+        finding_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List ring replay records in deterministic order."""
+        sql = (
+            "SELECT id, run_id, epoch, ring_node_id, corpus_key, finding_id, status, detail_json, created "
+            "FROM ring_replay WHERE 1=1"
+        )
+        params: list[object] = []
+        if run_id is not None:
+            sql += " AND run_id=?"
+            params.append(run_id)
+        if epoch is not None:
+            sql += " AND epoch=?"
+            params.append(epoch)
+        if ring_node_id is not None:
+            sql += " AND ring_node_id=?"
+            params.append(ring_node_id)
+        if corpus_key is not None:
+            sql += " AND corpus_key=?"
+            params.append(corpus_key)
+        if finding_id is not None:
+            sql += " AND finding_id=?"
+            params.append(finding_id)
+        sql += " ORDER BY epoch, created, id LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def ring_replay(self, replay_id: str) -> dict[str, Any] | None:
+        """Fetch one ring replay record."""
+        row = self._conn.execute(
+            "SELECT id, run_id, epoch, ring_node_id, corpus_key, finding_id, status, detail_json, created "
+            "FROM ring_replay WHERE id=?",
+            (replay_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def ring_health(self, ring_node_id: str) -> dict[str, Any] | None:
+        """Fetch ring health counters for one node."""
+        row = self._conn.execute(
+            "SELECT ring_node_id, failures, bad_marked, updated FROM ring_health WHERE ring_node_id=?",
+            (ring_node_id,),
         ).fetchone()
         return None if row is None else dict(row)
 

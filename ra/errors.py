@@ -83,6 +83,13 @@ class CasCorrupt(RaError):
     code = "CAS_CORRUPT"
 
 
+class IngestHashMismatch(RaError):
+    """Fetched ring source bytes did not match the expected SHA-256."""
+
+    code = "INGEST_HASH_MISMATCH"
+    retryable = False
+
+
 class BudgetExhausted(RaError):
     """Nightly budget exhausted."""
 
