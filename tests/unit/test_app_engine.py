@@ -1,0 +1,100 @@
+"""Tests for the native-app engine bridge."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from ra.app_engine.engine import (
+    EngineConfig,
+    _crash_leads,
+    config_from_env,
+    resolve_jsc,
+    run_engine,
+    stop_engine,
+)
+from ra.discovery.harness import CrashResult
+from ra.discovery.jsc_store import LedgerCrashStore
+from ra.ledger import Ledger
+
+
+def test_config_from_env_reads_engine_json(tmp_path: Path) -> None:
+    (tmp_path / "engine.json").write_text(
+        json.dumps({"jsc_binary": "/bin/true", "jsc_args": ["--foo"], "time_budget_s": 12}),
+        encoding="utf-8",
+    )
+    config = config_from_env(tmp_path, time_budget_s=3)
+    assert config.home == tmp_path
+    assert config.db_path == tmp_path / "ledger.sqlite"
+    assert config.time_budget_s == 3.0
+    assert config.jsc_binary == "/bin/true"
+    assert config.jsc_args == ("--foo",)
+
+
+def test_resolve_jsc_explicit_binary(tmp_path: Path) -> None:
+    binary = tmp_path / "jsc"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    config = EngineConfig(home=tmp_path, db_path=tmp_path / "ledger.sqlite", time_budget_s=1.0, jsc_binary=str(binary))
+    resolved = resolve_jsc(config)
+    assert resolved["binary"] == str(binary)
+    assert resolved["source"] == "engine"
+
+
+def test_run_engine_writes_native_workspace(tmp_path: Path) -> None:
+    binary = tmp_path / "jsc"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    home = tmp_path / "workspace"
+    config = EngineConfig(
+        home=home,
+        db_path=home / "ledger.sqlite",
+        time_budget_s=1.0,
+        jsc_binary=str(binary),
+        timeout_s=1.0,
+    )
+    assert asyncio.run(run_engine(config)) == 0
+    status = json.loads((home / "discovery" / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "complete"
+    assert status["executions"] > 0
+    leads = json.loads((home / "discovery" / "leads.json").read_text(encoding="utf-8"))
+    assert leads
+    assert any(lead["source_kind"] in {"chain", "escalation"} for lead in leads)
+    assert not asyncio.run(stop_engine(home))
+
+
+def test_crash_leads_carry_exploitability_grade(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        home = tmp_path / "crash-workspace"
+        home.mkdir()
+        run_id = "run-crash-test"
+        ledger = await Ledger.open(home / "ledger.sqlite")
+        try:
+            await ledger.create_run("macos", run_id=run_id, state="running")
+            result = CrashResult(
+                is_crash=True,
+                crash_type="ASSERTION_FAILED",
+                signal="SIGSEGV",
+                returncode=-11,
+                stderr="ASSERTION FAILED: JSC::foo\n#0 JSC::foo\n",
+                stack=("JSC::foo",),
+                signature="sig-crash-test",
+            )
+            record = await LedgerCrashStore(ledger).record_crash(
+                b"print('x')",
+                result,
+                {"handle_id": run_id, "run_id": run_id, "target": "WebKit/JavaScriptCore"},
+            )
+            assert record is not None
+            leads = await _crash_leads(ledger, home, run_id=run_id)
+            assert len(leads) == 1
+            lead = leads[0]
+            assert lead["source_kind"] == "fuzzer"
+            assert lead["rating"] in {"exploitable", "probably-exploitable", "unknown", "not-exploitable"}
+            assert (home / "discovery" / "triage" / f"{lead['crash_id']}.json").exists()
+        finally:
+            await ledger.end_run(run_id, "drained")
+            await ledger.close()
+
+    asyncio.run(scenario())

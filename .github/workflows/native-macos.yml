@@ -1,0 +1,40 @@
+name: Native macOS App
+on:
+  push:
+    branches: [main]
+    paths: ['macos/**', '.github/workflows/native-macos.yml']
+  pull_request:
+    paths: ['macos/**', '.github/workflows/native-macos.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test native app
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Compile app and run core tests
+        run: swift test --package-path macos
+      - name: Package real macOS application
+        run: bash macos/build-app.sh
+      - name: Verify application metadata and resource bundle
+        run: |
+          plutil -lint macos/dist/RedApple.app/Contents/Info.plist
+          test -x macos/dist/RedApple.app/Contents/MacOS/RedApple
+          test -d macos/dist/RedApple.app/Contents/Resources/RedApple_RedAppleCore.bundle
+      - name: Verify app resources without the original build directory
+        run: |
+          mv macos/.build macos/.build-resource-check
+          trap 'mv macos/.build-resource-check macos/.build' EXIT
+          "$PWD/macos/dist/RedApple.app/Contents/MacOS/RedApple" --verify-resources
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RedApple-macOS
+          path: macos/dist/RedApple-macOS.zip
+          if-no-files-found: error
