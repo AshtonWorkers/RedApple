@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import random
@@ -209,6 +210,7 @@ class _JscCampaignRunner:
         run_id: str,
         campaign_id: str,
         jsc: dict[str, Any],
+        crash_ids: set[str] | None = None,
     ) -> None:
         self._runner = runner
         self._store = store
@@ -217,7 +219,7 @@ class _JscCampaignRunner:
         self._run_id = run_id
         self._campaign_id = campaign_id
         self._jsc = jsc
-        self._crash_ids: set[str] = set()
+        self._crash_ids: set[str] = crash_ids if crash_ids is not None else set()
         self._since_write = 0
 
     async def run_seed(self, lane: str, seed: Any, *, tick: int, case_index: int) -> LaneTickResult:
@@ -278,7 +280,15 @@ class _JscCampaignRunner:
         )
 
 
-async def _campaign(config: EngineConfig, ledger: Ledger, jsc: dict[str, Any], status: _StatusWriter, stop_event: asyncio.Event) -> tuple[str, dict[str, Any]]:
+async def _campaign(
+    config: EngineConfig,
+    ledger: Ledger,
+    jsc: dict[str, Any],
+    status: _StatusWriter,
+    stop_event: asyncio.Event,
+    *,
+    crash_ids: set[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     campaign_id = f"app-{uuid.uuid4().hex[:12]}"
     run_id = status.run_id
     programs = load_corpus(config.corpus_dir)
@@ -322,6 +332,7 @@ async def _campaign(config: EngineConfig, ledger: Ledger, jsc: dict[str, Any], s
         run_id=run_id,
         campaign_id=campaign_id,
         jsc=jsc,
+        crash_ids=crash_ids,
     )
     orchestrator = CampaignOrchestrator(ledger, namespace="app")
     status.write("fuzzing", "Fuzzing JavaScriptCore")
@@ -374,6 +385,61 @@ async def _exploitability(ledger: Ledger, record: Any, *, run_id: str) -> Any | 
 
 def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value)[:80] or "crash"
+
+
+_STAGE_LABELS = {
+    "jsc": "JavaScriptCore",
+    "xpc": "XPC dispatch",
+    "sandbox": "Sandbox escape",
+    "kernel": "Kernel",
+    "media": "Media pipeline",
+    "codec": "Codec",
+    "font": "Font parser",
+    "render": "Renderer",
+    "iokit": "IOKit",
+    "network": "Network stack",
+    "other": "Other surface",
+}
+
+
+def _hop_status(reliability: float) -> str:
+    if reliability >= 0.6:
+        return "supported"
+    if reliability >= 0.3:
+        return "exploring"
+    return "unproven"
+
+
+def _escalation_chain_stages(path: Any, by_id: dict[str, Any]) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    node_ids = tuple(path.nodes)
+    for index, node_id in enumerate(node_ids[:5]):
+        node = by_id.get(str(node_id))
+        label = str(getattr(node, "name", "") or node_id)
+        status = "exploring" if index == len(node_ids) - 1 else "supported"
+        detail = ""
+        if node is not None:
+            detail = f"privilege {float(node.privilege):.1f} · impact {float(node.impact):.2f}"
+        stages.append({"stage": label, "status": status, "detail": detail})
+    return stages
+
+
+def _surface_chain_stages(path: Any) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    for index, category in enumerate(tuple(path.categories)[:5]):
+        label = _STAGE_LABELS.get(str(category), str(category))
+        if index == 0:
+            stages.append({"stage": label, "status": "confirmed", "detail": "Grounded in a reproduced crash"})
+        else:
+            edge = path.edges[index - 1]
+            stages.append(
+                {
+                    "stage": label,
+                    "status": _hop_status(float(edge.reliability)),
+                    "detail": f"Hop reliability {float(edge.reliability):.2f}",
+                }
+            )
+    return stages
 
 
 async def _crash_leads(ledger: Ledger, root: Path, *, run_id: str) -> list[dict[str, Any]]:
@@ -481,6 +547,11 @@ async def _chain_leads(ledger: Ledger, leads: list[dict[str, Any]], *, run_id: s
                     "confidence": quality.quality_score,
                     "needs_review": False,
                     "source_kind": "chain",
+                    "quality_score": float(quality.quality_score),
+                    "impact": float(path.impact),
+                    "feasibility": float(path.feasibility),
+                    "hops": int(path.hop_count),
+                    "chain_stages": _surface_chain_stages(path),
                 }
             )
     except Exception:
@@ -507,6 +578,7 @@ async def _escalation_leads(ledger: Ledger, leads: list[dict[str, Any]], *, run_
         graph = EscalationGraph(nodes=nodes, edges=edges)
         result = analyze_escalations(graph, max_paths=4)
         await EscalationLedgerEmitter(ledger).emit(result, run_id=run_id, limit=4)
+        by_id = {node.id: node for node in nodes}
         for path in result.paths[:2]:
             extra.append(
                 {
@@ -525,11 +597,172 @@ async def _escalation_leads(ledger: Ledger, leads: list[dict[str, Any]], *, run_
                     "confidence": path.reliability,
                     "needs_review": False,
                     "source_kind": "escalation",
+                    "privilege_gain": float(path.privilege_gain),
+                    "impact_score": float(path.impact_score),
+                    "reliability": float(path.reliability),
+                    "stage_progress": int(path.stage_progress),
+                    "chain_stages": _escalation_chain_stages(path, by_id),
                 }
             )
     except Exception:
         pass
     return leads + extra
+
+
+PROVEN_SOURCES = frozenset({"chain", "escalation"})
+PROVEN_GRADES = frozenset({"exploitable", "probably-exploitable"})
+MAX_PROVEN_FINDINGS = 20
+LOOP_CYCLE_PAUSE_S = 2.0
+
+
+def _is_proven_lead(lead: dict[str, Any]) -> bool:
+    return str(lead.get("source_kind") or "") in PROVEN_SOURCES or str(lead.get("rating") or "") in PROVEN_GRADES
+
+
+def _read_lead_triage(lead: dict[str, Any], root: Path) -> dict[str, Any]:
+    artifact = lead.get("artifact_path")
+    if not isinstance(artifact, str) or not artifact:
+        return {}
+    path = Path(artifact)
+    if not path.is_absolute():
+        path = root / artifact
+    data = ws.load_json(path, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _default_chain_stages(source_kind: str) -> list[dict[str, Any]]:
+    if source_kind != "fuzzer":
+        return []
+    return [
+        {"stage": "JavaScriptCore", "status": "confirmed", "detail": "Crash reproduced by the fuzzer"},
+        {"stage": "XPC dispatch", "status": "exploring", "detail": "Chain search treats this as the next hop"},
+        {"stage": "Sandbox escape", "status": "unproven", "detail": "No escape evidence yet"},
+        {"stage": "Kernel", "status": "unproven", "detail": "No kernel evidence yet"},
+    ]
+
+
+def _fuzzer_evidence(lead: dict[str, Any], triage: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    crash_type = str(triage.get("crash_type") or "crash")
+    signal = str(triage.get("signal") or "unknown")
+    returncode = triage.get("returncode")
+    evidence.append(
+        {"label": "Reproducible crash", "value": "Recorded", "detail": f"{crash_type} · {signal} · exit {returncode}"}
+    )
+    repro = triage.get("repro")
+    content = str(repro.get("content") or "") if isinstance(repro, dict) else ""
+    lines = content.count("\n") + 1 if content else 0
+    evidence.append(
+        {
+            "label": "Minimized testcase",
+            "value": f"{lines} lines" if lines else "Stored",
+            "detail": "Repro artifact kept in the workspace",
+        }
+    )
+    signature = str(triage.get("signature") or "")
+    if signature:
+        evidence.append({"label": "Unique crash fingerprint", "value": signature, "detail": "Stable dedup signature"})
+    assessment = triage.get("exploitability")
+    assessment = assessment if isinstance(assessment, dict) else {}
+    grade = str(assessment.get("exploitability_grade") or lead.get("rating") or "unknown")
+    confidence = assessment.get("confidence")
+    detail = f"confidence {confidence:.2f}" if isinstance(confidence, (int, float)) else "heuristic classification"
+    evidence.append({"label": "Exploitability grade", "value": grade, "detail": detail})
+    stack = triage.get("stack")
+    if isinstance(stack, list) and stack:
+        evidence.append({"label": "Stack frames", "value": str(len(stack)), "detail": str(stack[0])[:120]})
+    return evidence
+
+
+def _score_evidence(lead: dict[str, Any], pairs: list[tuple[str, Any, str]]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for label, value, detail in pairs:
+        if isinstance(value, (int, float)):
+            evidence.append({"label": label, "value": f"{float(value):.2f}", "detail": detail})
+        elif value is not None:
+            evidence.append({"label": label, "value": str(value), "detail": detail})
+    return evidence
+
+
+def _evidence_items(lead: dict[str, Any], triage: dict[str, Any], source_kind: str) -> list[dict[str, Any]]:
+    if source_kind == "fuzzer":
+        return _fuzzer_evidence(lead, triage)
+    if source_kind == "chain":
+        return _score_evidence(
+            lead,
+            [
+                ("Chain quality score", lead.get("quality_score"), "Ranked by the chain search"),
+                ("Impact", lead.get("impact"), "Path impact score"),
+                ("Feasibility", lead.get("feasibility"), "Path feasibility score"),
+                ("Hops", lead.get("hops"), "Cross-surface hops in the path"),
+            ],
+        )
+    if source_kind == "escalation":
+        return _score_evidence(
+            lead,
+            [
+                ("Privilege gain", lead.get("privilege_gain"), "Privilege delta along the path"),
+                ("Impact score", lead.get("impact_score"), "Path impact score"),
+                ("Reliability", lead.get("reliability"), "Path reliability score"),
+                ("Stage progress", lead.get("stage_progress"), "Escalation stages covered"),
+            ],
+        )
+    return []
+
+
+def _next_step(source_kind: str, grade: str) -> str:
+    if source_kind == "chain":
+        return "Validate each hop with a concrete proof of concept, starting at the confirmed stage."
+    if source_kind == "escalation":
+        return "Map the escalation path to a concrete entitlement or service target and test reachability."
+    if grade == "exploitable":
+        return "Reproduce the crash manually, minimize the testcase, and check whether the primitive reaches XPC services."
+    if grade == "probably-exploitable":
+        return "Confirm reproducibility, then look for a controlled read or write primitive."
+    return "Review the diagnostic artifact and record triage notes before deeper work."
+
+
+def _proven_finding(lead: dict[str, Any], root: Path) -> dict[str, Any]:
+    source_kind = str(lead.get("source_kind") or "fuzzer")
+    grade = str(lead.get("rating") or "unknown")
+    triage = _read_lead_triage(lead, root)
+    stages = lead.get("chain_stages")
+    chain = [dict(stage) for stage in stages if isinstance(stage, dict)] if isinstance(stages, list) else []
+    if not chain:
+        chain = _default_chain_stages(source_kind)
+    return {
+        "id": str(lead.get("id") or ""),
+        "title": str(lead.get("title") or "Untitled finding"),
+        "component": str(lead.get("component") or ""),
+        "summary": str(lead.get("summary") or ""),
+        "grade": grade,
+        "confidence": float(lead.get("confidence") or 0.0),
+        "source_kind": source_kind,
+        "created_at": str(lead.get("created_at") or ""),
+        "run_id": str(lead.get("run_id") or ""),
+        "artifact_path": str(lead.get("artifact_path") or ""),
+        "signature": str(triage.get("signature") or ""),
+        "chain": chain,
+        "evidence": _evidence_items(lead, triage, source_kind),
+        "next_step": _next_step(source_kind, grade),
+    }
+
+
+def write_proven_findings(root: Path, leads: list[dict[str, Any]], *, run_id: str) -> list[dict[str, Any]]:
+    """Promote validated leads and exploit chains into the proven-findings feed."""
+    findings = [_proven_finding(lead, root) for lead in leads if _is_proven_lead(lead)]
+    findings.sort(key=lambda item: -item["confidence"])
+    findings = findings[:MAX_PROVEN_FINDINGS]
+    ws.save_json(
+        ws.proven_path(root),
+        {
+            "schema_version": ws.SCHEMA_VERSION,
+            "updated_at": ws.utcnow(),
+            "run_id": run_id,
+            "findings": findings,
+        },
+    )
+    return findings
 
 
 async def run_engine(config: EngineConfig, stop_event: asyncio.Event | None = None) -> int:
@@ -564,6 +797,7 @@ async def run_engine(config: EngineConfig, stop_event: asyncio.Event | None = No
                 leads = await _chain_leads(ledger, crash_leads, run_id=run_id)
                 leads = await _escalation_leads(ledger, leads, run_id=run_id)
                 ws.write_leads(root, leads)
+                write_proven_findings(root, leads, run_id=run_id)
                 run_state = "drained"
             except EngineStopped:
                 run_state = "aborted"
@@ -596,6 +830,95 @@ async def run_engine(config: EngineConfig, stop_event: asyncio.Event | None = No
         return 130
     except Exception as exc:
         status.write("failed", str(exc), leads=0)
+        return 1
+    finally:
+        ws.release_lock(root, run_id)
+
+
+async def loop_engine(config: EngineConfig, stop_event: asyncio.Event | None = None) -> int:
+    """Run discovery campaigns back-to-back until the user stops the loop."""
+    stop = stop_event or asyncio.Event()
+    root = config.home
+    ws.ensure_dirs(root)
+    run_id = f"loop-{uuid.uuid4().hex[:12]}"
+    started_at = ws.utcnow()
+    status = _StatusWriter(root, run_id=run_id, model=config.model, budget_s=config.time_budget_s, started_at=started_at)
+    try:
+        ws.acquire_lock(root, run_id)
+    except ws.RunLockError as exc:
+        status.write("failed", str(exc))
+        return 1
+    crash_ids: set[str] = set()
+    total_leads = 0
+    iteration = 0
+    try:
+        status.write("building", "Resolving JavaScriptCore")
+        try:
+            jsc = resolve_jsc(config)
+        except Exception as exc:
+            status.write("failed", str(exc))
+            return 2
+        async with await Ledger.open(config.db_path) as ledger:
+            await ledger.create_run(
+                "macos",
+                budget={"spend_usd_micro": 0, "max_wall_ms": int(config.time_budget_s * 1000)},
+                state="running",
+                run_id=run_id,
+            )
+            try:
+                while not stop.is_set():
+                    iteration += 1
+                    cycle_started = time.monotonic()
+                    cycle_started_at = ws.utcnow()
+                    executions_before = status.executions
+                    crashes_before = status.crashes
+                    try:
+                        campaign_id, campaign_summary = await _campaign(
+                            config, ledger, jsc, status, stop, crash_ids=crash_ids
+                        )
+                    except EngineStopped:
+                        break
+                    status.write("triaging", f"Triaging crashes and chains (cycle {iteration})")
+                    crash_leads = await _crash_leads(ledger, root, run_id=run_id)
+                    leads = await _chain_leads(ledger, crash_leads, run_id=run_id)
+                    leads = await _escalation_leads(ledger, leads, run_id=run_id)
+                    new_leads = max(0, len(leads) - total_leads)
+                    total_leads = len(leads)
+                    ws.write_leads(root, leads)
+                    write_proven_findings(root, leads, run_id=run_id)
+                    ws.append_run(
+                        root,
+                        {
+                            "run_id": f"{run_id}-cycle-{iteration}",
+                            "iteration": iteration,
+                            "campaign_id": campaign_id,
+                            "started_at": cycle_started_at,
+                            "ended_at": ws.utcnow(),
+                            "wall_s": round(time.monotonic() - cycle_started, 3),
+                            "executions": status.executions - executions_before,
+                            "crashes": status.crashes - crashes_before,
+                            "leads": total_leads,
+                            "new_leads": new_leads,
+                            "jsc": jsc,
+                            "campaign": campaign_summary,
+                            "model": config.model,
+                        },
+                    )
+                    status.write("fuzzing", f"Cycle {iteration} complete · fuzzing continues", leads=total_leads)
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(stop.wait(), timeout=LOOP_CYCLE_PAUSE_S)
+            finally:
+                await ledger.end_run(run_id, "aborted")
+        status.write("stopped", "Stopped by user", leads=total_leads)
+        return 130
+    except EngineStopped:
+        status.write("stopped", "Stopped by user", leads=total_leads)
+        return 130
+    except asyncio.CancelledError:
+        status.write("stopped", "Stopped", leads=total_leads)
+        return 130
+    except Exception as exc:
+        status.write("failed", str(exc), leads=total_leads)
         return 1
     finally:
         ws.release_lock(root, run_id)

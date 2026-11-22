@@ -17,6 +17,12 @@ final class AppModel: ObservableObject {
     @Published var usingBundledPatches = true
     @Published var engineRunning = false
     @Published var engineMessage: String?
+    var engineConfigured: Bool {
+        let repo = URL(fileURLWithPath: (engineRepository as NSString).expandingTildeInPath)
+        let repoReady = !engineRepository.isEmpty && FileManager.default.fileExists(atPath: repo.appendingPathComponent("ra/app_engine/__main__.py").path)
+        let python = (pythonPath as NSString).expandingTildeInPath
+        return repoReady && FileManager.default.isExecutableFile(atPath: python)
+    }
     @Published var engineRepository = UserDefaults.standard.string(forKey: "engineRepository") ?? ""
     @Published var pythonPath = UserDefaults.standard.string(forKey: "pythonPath") ?? "/usr/bin/python3" {
         didSet { UserDefaults.standard.set(pythonPath, forKey: "pythonPath") }
@@ -127,7 +133,7 @@ final class AppModel: ObservableObject {
     func runEngine() {
         guard !engineRunning else { return }
         do {
-            let process = try configuredEngine(arguments: ["run", "--time-budget", String(timeBudget), "--json"])
+            let process = try configuredEngine(arguments: ["loop", "--time-budget", String(timeBudget), "--json"])
             let fm = FileManager.default
             try fm.createDirectory(at: workspace.root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let log = workspace.url("native-engine.log")
@@ -139,13 +145,14 @@ final class AppModel: ObservableObject {
                 try? handle.close()
                 Task { @MainActor [weak self] in
                     self?.engineRunning = false; self?.engineProcess = nil
-                    self?.engineMessage = process.terminationStatus == 0 ? "Engine run finished." : "Engine exited with code \(process.terminationStatus). Open the engine log for details."
+                    let status = process.terminationStatus
+                    self?.engineMessage = status == 130 ? "Engine stopped." : (status == 0 ? "Engine run finished." : "Engine exited with code \(status). Open the engine log for details.")
                     self?.reloadDiscovery()
                 }
             }
             try process.run()
             engineProcess = process; engineRunning = true
-            engineMessage = "Engine started. Build output is in the engine log; discovery files refresh every 5 seconds."
+            engineMessage = "Discovery loop started. It keeps fuzzing until you press Stop; counters refresh every 5 seconds."
         } catch { engineMessage = error.localizedDescription }
     }
 

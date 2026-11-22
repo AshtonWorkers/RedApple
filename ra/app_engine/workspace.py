@@ -40,6 +40,10 @@ def leads_path(root: Path | None = None) -> Path:
     return discovery_dir(root) / "leads.json"
 
 
+def proven_path(root: Path | None = None) -> Path:
+    return discovery_dir(root) / "proven.json"
+
+
 def runs_path(root: Path | None = None) -> Path:
     return discovery_dir(root) / "runs.json"
 

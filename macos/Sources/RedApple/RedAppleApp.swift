@@ -24,6 +24,7 @@ struct RedAppleApp: App {
             ContentView().environmentObject(model)
                 .frame(minWidth: 1000, minHeight: 650)
                 .tint(.red)
+                .preferredColorScheme(.dark)
                 .task {
                     while !Task.isCancelled {
                         model.reloadDiscovery()
@@ -40,7 +41,6 @@ struct RedAppleApp: App {
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload Discovery") { model.reloadDiscovery() }.keyboardShortcut("r")
-                Button("Refresh Apple Patches") { model.refreshPatches() }.disabled(model.refreshing)
             }
         }
         Settings { SettingsView().environmentObject(model) }

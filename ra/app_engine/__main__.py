@@ -9,7 +9,7 @@ import signal
 import sys
 
 from . import workspace as ws
-from .engine import config_from_env, run_engine, stop_engine
+from .engine import config_from_env, loop_engine, run_engine, stop_engine
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,6 +18,9 @@ def _parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run")
     run.add_argument("--time-budget", type=float, default=None)
     run.add_argument("--json", action="store_true")
+    loop = sub.add_parser("loop")
+    loop.add_argument("--time-budget", type=float, default=None)
+    loop.add_argument("--json", action="store_true")
     stop = sub.add_parser("stop")
     stop.add_argument("--json", action="store_true")
     status = sub.add_parser("status")
@@ -34,7 +37,10 @@ async def _run(args: argparse.Namespace) -> int:
         except NotImplementedError:
             signal.signal(sig, lambda *_: stop_event.set())
     config = config_from_env(time_budget_s=args.time_budget)
-    code = await run_engine(config, stop_event)
+    if args.command == "loop":
+        code = await loop_engine(config, stop_event)
+    else:
+        code = await run_engine(config, stop_event)
     if args.json:
         status = ws.load_json(ws.status_path(config.home), {})
         print(json.dumps(status, indent=2, ensure_ascii=False))
@@ -43,7 +49,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "run":
+    if args.command in {"run", "loop"}:
         return asyncio.run(_run(args))
     if args.command == "stop":
         stopped = asyncio.run(stop_engine())
