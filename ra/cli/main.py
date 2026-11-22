@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -83,6 +85,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except RaError as exc:
         print(json.dumps({"error": exc.code, "message": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2
+    except (sqlite3.Error, OSError, KeyError, TypeError, ValueError) as exc:
+        print(
+            json.dumps({"error": "FORMAT_FAIL", "message": str(exc)}, sort_keys=True),
+            file=sys.stderr,
+        )
+        return 2
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
@@ -149,6 +157,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     load_config(args.config)
     from ..press.client import ReplayQueue
 
+    valid_types = {item.value for item in route_for_task_types()}
+    if args.type is not None and args.type not in valid_types:
+        raise FormatFail("--type must be a PRESS task type")
     queue = ReplayQueue(args.queue)
     records = queue.read_all()
     valid = 0
@@ -158,7 +169,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             task_type = record.get("task_type")
             sha = record.get("sha")
             packet = record.get("packet")
-            if task_type not in {item.value for item in route_for_task_types()}:
+            if task_type not in valid_types:
                 raise FormatFail("bad task_type")
             if not isinstance(sha, str) or len(sha) != 64:
                 raise FormatFail("bad sha")
@@ -186,6 +197,17 @@ def route_for_task_types() -> tuple[Any, ...]:
     return tuple(TaskType)
 
 
+def _load_baseline(path: Path) -> float:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        score = float(payload["score"])
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise FormatFail(f"invalid golden baseline {path}: {exc}") from exc
+    if not math.isfinite(score):
+        raise FormatFail(f"invalid golden baseline {path}: score must be finite")
+    return score
+
+
 def _cmd_golden(args: argparse.Namespace) -> int:
     load_config(args.config)
     path = args.file or Path("tests/golden") / f"{args.type}.jsonl"
@@ -193,9 +215,7 @@ def _cmd_golden(args: argparse.Namespace) -> int:
         cases = load_golden(path, args.type)
     except (OSError, ValueError) as exc:
         raise FormatFail(f"cannot load golden set {path}: {exc}") from exc
-    baseline = None
-    if args.baseline is not None:
-        baseline = float(json.loads(args.baseline.read_text(encoding="utf-8"))["score"])
+    baseline = _load_baseline(args.baseline) if args.baseline is not None else None
     report = check_golden(cases, _offline_responder, baseline=baseline)
     payload = {
         "task_type": report.task_type.value,

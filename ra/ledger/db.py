@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import sqlite3
-from collections.abc import Mapping, Sequence
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from ..errors import DuplicateDedup, FormatFail, RaError
 from .ids import UlidFactory  # noqa: F401  (re-exported for callers)
@@ -32,6 +36,11 @@ WORK_ORDER_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 RUN_MODES = frozenset({"macos", "ios"})
 RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})
+RUN_ACTIVE_STATES = frozenset({"armed", "running"})
+RUN_TERMINAL_STATES = frozenset({"drained", "aborted"})
+RING_NODE_STATES = frozenset({"active", "current", "bad", "retired"})
+DEVICE_STATES = frozenset({"attached", "needs_hand", "ready", "failed"})
+DEVICE_THERMAL_STATES = frozenset({"nominal", "serious", "critical"})
 _MISSING: Any = object()
 
 
@@ -84,25 +93,138 @@ def _list(payload: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
     return out
 
 
+def _finite_nonnegative_float(payload: Mapping[str, Any], key: str) -> float:
+    value = _float(payload, key)
+    if not math.isfinite(value) or value < 0:
+        raise FormatFail(f"{key} must be a finite non-negative number")
+    return value
+
+
+def _optional_int_nonnegative(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise FormatFail(f"{key} must be a non-negative integer")
+    return value
+
+
+def _optional_bool(payload: Mapping[str, Any], key: str) -> bool | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise FormatFail(f"{key} must be a boolean")
+    return value
+
+
+def _optional_finite_nonnegative_float(payload: Mapping[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise FormatFail(f"{key} must be a finite non-negative number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise FormatFail(f"{key} must be a finite non-negative number")
+    return result
+
+
+def _entry_point_values(payload: Mapping[str, Any]) -> tuple[int, float, float]:
+    privilege_delta = _int(payload, "privilege_delta")
+    if privilege_delta < 0:
+        raise FormatFail("privilege_delta must be non-negative")
+    return (
+        privilege_delta,
+        _finite_nonnegative_float(payload, "parser_complexity"),
+        _finite_nonnegative_float(payload, "weight"),
+    )
+
+
+_ThreadFunc = TypeVar("_ThreadFunc", bound=Callable[..., Any])
+
+
+def _guard_thread(func: _ThreadFunc) -> _ThreadFunc:
+    @wraps(func)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if threading.get_ident() != self._owner_thread:
+            raise RaError("ledger store is bound to its opening thread", code="LEDGER_THREAD")
+        return func(self, *args, **kwargs)
+
+    return cast(_ThreadFunc, wrapper)
+
+
+_STORE_GUARDED_METHODS = frozenset(
+    {
+        "apply_batch",
+        "get_claim",
+        "claim_by_dedup",
+        "claims_by_state",
+        "claims_by_type",
+        "claim_artifact_count",
+        "claim_artifacts",
+        "get_work_order",
+        "ready_work_orders",
+        "work_orders_for_unit",
+        "spent_usd_micro",
+        "artifact_ttl_counts",
+        "oldest_artifact",
+        "ring_nodes",
+        "ring_node",
+        "entry_points",
+        "retention_candidates",
+        "artifact_count",
+        "invariant_counts",
+        "explain",
+        "counts",
+        "table_names",
+        "index_names",
+        "pragma_value",
+        "integrity_check",
+    }
+)
+
+
 class LedgerStore:
-    """Synchronous SQLite store used only by the ledger actor."""
+    """Synchronous SQLite store used only by the ledger actor.
+
+    Reads and writes are bound to the thread that opened the store; call them
+    from the ledger's event-loop thread.
+    """
+
+    def __getattribute__(self, name: str) -> Any:
+        attr = super().__getattribute__(name)
+        if name in _STORE_GUARDED_METHODS and callable(attr):
+            owner_thread = super().__getattribute__("_owner_thread")
+            if threading.get_ident() != owner_thread:
+                raise RaError("ledger store is bound to its opening thread", code="LEDGER_THREAD")
+        return attr
 
     def __init__(self, path: str | Path, *, wal_autocheckpoint: int = 1000) -> None:
-        self.path = str(path)
+        self._owner_thread = threading.get_ident()
+        expanded = Path(path).expanduser()
+        self.path = str(expanded)
         self._wal_autocheckpoint = wal_autocheckpoint
         if self.path != ":memory:":
-            Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            expanded.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._configure()
         self._initialize_schema()
 
     def _configure(self) -> None:
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        for attempt in range(5):
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 4:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
         pragmas = {
             "foreign_keys": "ON",
-            "journal_mode": "WAL",
             "synchronous": "NORMAL",
-            "busy_timeout": "5000",
             "cache_size": "-262144",
             "mmap_size": "536870912",
             "temp_store": "MEMORY",
@@ -208,6 +330,8 @@ class LedgerStore:
             raise FormatFail("run mode must be macos or ios")
         if state not in RUN_STATES:
             raise FormatFail("run state is invalid")
+        if state not in RUN_ACTIVE_STATES:
+            raise FormatFail("run must be created armed or running")
         self._conn.execute(
             "INSERT INTO run(id, started, ended, mode, budget_json, state) VALUES(?,?,?,?,?,?)",
             (
@@ -222,9 +346,20 @@ class LedgerStore:
         return run_id
 
     def _op_end_run(self, payload: Mapping[str, Any]) -> bool:
+        state = _text(payload, "state")
+        if state not in RUN_TERMINAL_STATES:
+            raise FormatFail("end_run state must be drained or aborted")
+        row = self._conn.execute(
+            "SELECT state FROM run WHERE id=?", (_text(payload, "run_id"),)
+        ).fetchone()
+        if row is None:
+            return False
+        current = str(row["state"])
+        if current not in RUN_ACTIVE_STATES:
+            raise FormatFail(f"run is already {current}")
         cursor = self._conn.execute(
             "UPDATE run SET ended=?, state=? WHERE id=?",
-            (_int(payload, "ended"), _text(payload, "state"), _text(payload, "run_id")),
+            (_int(payload, "ended"), state, _text(payload, "run_id")),
         )
         return cursor.rowcount == 1
 
@@ -369,7 +504,7 @@ class LedgerStore:
                     action,
                     _text(payload, "unit"),
                     _opt_text(payload, "payload_json"),
-                    _float(payload, "ev_cost"),
+                    _finite_nonnegative_float(payload, "ev_cost"),
                     state,
                     _int(payload, "created"),
                 ),
@@ -478,12 +613,12 @@ class LedgerStore:
                 _opt_text(payload, "run_id"),
                 _opt_text(payload, "task_type"),
                 _text(payload, "sha"),
-                payload.get("tokens_in"),
-                payload.get("tokens_out"),
-                payload.get("latency_ms"),
-                payload.get("schema_ok"),
-                payload.get("bound_ok"),
-                payload.get("relevance"),
+                _optional_int_nonnegative(payload, "tokens_in"),
+                _optional_int_nonnegative(payload, "tokens_out"),
+                _optional_int_nonnegative(payload, "latency_ms"),
+                _optional_bool(payload, "schema_ok"),
+                _optional_bool(payload, "bound_ok"),
+                _optional_finite_nonnegative_float(payload, "relevance"),
                 _int(payload, "created"),
             ),
         )
@@ -491,6 +626,12 @@ class LedgerStore:
 
     def _op_upsert_ring_node(self, payload: Mapping[str, Any]) -> str:
         node_id = _text(payload, "ring_node_id")
+        state = _text(payload, "state")
+        epoch = _int(payload, "epoch")
+        if state not in RING_NODE_STATES:
+            raise FormatFail("ring node state is invalid")
+        if epoch < 0:
+            raise FormatFail("ring node epoch must be non-negative")
         self._conn.execute(
             """
             INSERT INTO ring_node(id, ipsw_sha, build, xcode, sdk, webkit_commit, state, epoch)
@@ -506,14 +647,19 @@ class LedgerStore:
                 _text(payload, "xcode"),
                 _text(payload, "sdk"),
                 _text(payload, "webkit_commit"),
-                _text(payload, "state"),
-                _int(payload, "epoch"),
+                state,
+                epoch,
             ),
         )
         return node_id
 
     def _op_advance_ring(self, payload: Mapping[str, Any]) -> int:
         epoch = _int(payload, "epoch")
+        if epoch < 0:
+            raise FormatFail("ring epoch must be non-negative")
+        current = self._conn.execute("SELECT COALESCE(MAX(epoch), -1) AS epoch FROM ring_node").fetchone()
+        if epoch <= int(current["epoch"]):
+            raise FormatFail("ring epoch must increase")
         nodes = _list(payload, "nodes")
         ids: list[str] = []
         for node in nodes:
@@ -531,6 +677,15 @@ class LedgerStore:
 
     def _op_upsert_device_profile(self, payload: Mapping[str, Any]) -> str:
         udid = _text(payload, "udid")
+        state = _text(payload, "state")
+        thermal = _opt_text(payload, "thermal")
+        crashes = _int(payload, "crashes")
+        if state not in DEVICE_STATES:
+            raise FormatFail("device state is invalid")
+        if thermal is not None and thermal not in DEVICE_THERMAL_STATES:
+            raise FormatFail("device thermal is invalid")
+        if crashes < 0:
+            raise FormatFail("device crashes must be non-negative")
         self._conn.execute(
             """
             INSERT INTO device_profile(udid, build, tier, state, thermal, crashes, exclusion_window, ring_node)
@@ -543,9 +698,9 @@ class LedgerStore:
                 udid,
                 _opt_text(payload, "build"),
                 _opt_text(payload, "tier"),
-                _text(payload, "state"),
-                _opt_text(payload, "thermal"),
-                _int(payload, "crashes"),
+                state,
+                thermal,
+                crashes,
                 _opt_text(payload, "exclusion_window"),
                 _opt_text(payload, "ring_node"),
             ),
@@ -587,6 +742,7 @@ class LedgerStore:
 
     def _op_insert_entry_point(self, payload: Mapping[str, Any]) -> str:
         entry_id = _text(payload, "entry_point_id")
+        privilege_delta, parser_complexity, weight = _entry_point_values(payload)
         self._conn.execute(
             """
             INSERT INTO entry_point(id, name, reach_from_json, privilege_delta, parser_complexity, weight, ring_node)
@@ -596,9 +752,9 @@ class LedgerStore:
                 entry_id,
                 _text(payload, "name"),
                 _text(payload, "reach_from_json"),
-                _int(payload, "privilege_delta"),
-                _float(payload, "parser_complexity"),
-                _float(payload, "weight"),
+                privilege_delta,
+                parser_complexity,
+                weight,
                 _text(payload, "ring_node"),
             ),
         )
@@ -609,6 +765,7 @@ class LedgerStore:
         rows = _list(payload, "rows")
         self._conn.execute("DELETE FROM entry_point WHERE ring_node=?", (ring_node,))
         for row in rows:
+            privilege_delta, parser_complexity, weight = _entry_point_values(row)
             self._conn.execute(
                 """
                 INSERT INTO entry_point(id, name, reach_from_json, privilege_delta, parser_complexity, weight, ring_node)
@@ -618,9 +775,9 @@ class LedgerStore:
                     _text(row, "entry_point_id"),
                     _text(row, "name"),
                     _text(row, "reach_from_json"),
-                    _int(row, "privilege_delta"),
-                    _float(row, "parser_complexity"),
-                    _float(row, "weight"),
+                    privilege_delta,
+                    parser_complexity,
+                    weight,
                     ring_node,
                 ),
             )

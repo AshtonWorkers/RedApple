@@ -174,7 +174,11 @@ class ReplayQueue:
         if not self.path.exists():
             return []
         out: list[dict[str, Any]] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise FormatFail(f"cannot read replay queue {self.path}: {exc}") from exc
+        for line in text.splitlines():
             if not line.strip():
                 continue
             try:
