@@ -8,6 +8,7 @@ from typing import Any
 
 from ..errors import DuplicateDedup
 from ..ledger import ArtifactInput, ClaimArtifactInput, ClaimInput, ClaimState, Ledger, UlidFactory
+from .crashsig import classify_crash
 from .models import CampaignState, CrashRecord, CrashRefLike
 
 
@@ -100,26 +101,30 @@ class LedgerDiscoveryStore:
         seed_index: int,
         case_index: int,
         created_ms: int,
+        image_format: str | None = None,
     ) -> CrashRecord:
-        """Record one crash reference; duplicate signatures return ``claim_id=None``."""
+        """Record one crash reference; duplicate crash *classes* return ``claim_id=None``.
+
+        Dedup keys on the classified crash signature (kind/context/category/
+        signal/exception/image format) so the same bug found by different cases
+        collapses into one claim. Per-occurrence detail (case id, input digest,
+        payload hash, metadata) stays in the claim value.
+        """
+        classification = classify_crash(crash, image_format=image_format)
         payload = bytes(getattr(crash, "payload", b"") or b"")
         metadata = dict(getattr(crash, "metadata", {}) or {})
-        signature = {
-            "campaign_id": campaign_id,
+        signature = classification.signature(campaign_id)
+        dedup = "discovery_crash:" + _sha256(_json_dumps(signature).encode("utf-8"))
+        value = {
+            **signature,
             "case_id": case_id,
-            "kind": str(getattr(crash, "kind", "unknown")),
-            "context": str(getattr(crash, "context", "app")),
+            "crash_id": str(getattr(crash, "id", "")),
+            "handle_id": getattr(crash, "handle_id", None),
+            "path": getattr(crash, "path", None),
             "digest": getattr(crash, "digest", None),
             "payload_sha256": _payload_sha256(payload),
             "input_sha256": input_digest,
             "metadata": metadata,
-        }
-        dedup = "discovery_crash:" + _sha256(_json_dumps(signature).encode("utf-8"))
-        value = {
-            **signature,
-            "crash_id": str(getattr(crash, "id", "")),
-            "handle_id": getattr(crash, "handle_id", None),
-            "path": getattr(crash, "path", None),
             "created_ms": int(getattr(crash, "created_ms", created_ms)),
             "strategy": strategy,
             "seed_index": seed_index,

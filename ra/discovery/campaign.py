@@ -247,6 +247,7 @@ class DiscoveryCampaign:
                 seed_index=case.seed_index,
                 case_index=case.index,
                 created_ms=state.updated_ms,
+                image_format=case.image_format,
             )
             if record.claim_id is None:
                 state.crashes_deduped += 1

@@ -117,6 +117,7 @@ class MutationCase:
     data: bytes
     digest: str
     gate_pass: bool
+    image_format: str | None = None
 
 
 @dataclass

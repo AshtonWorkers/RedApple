@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from ..errors import RaError
+from .images import IMAGE_FORMATS
 from .models import DiscoveryHarnessRef
 
 
@@ -55,6 +56,7 @@ def imageio_heif_harness_ref(feed_binary: Path, *, name: str = "imageio_heif_fee
         metadata={
             "surface": "imageio.heif",
             "format": "heif",
+            "image_formats": list(IMAGE_FORMATS),
             "feed_argv": argv,
             "build_webkit": False,
             "saturated_return_codes": [75],
@@ -70,4 +72,5 @@ def macos_verification_checklist() -> list[str]:
         "confirm ImageIO crash reports appear as CrashRef(kind='macos_vm_crash')",
         "verify thermal pause/drain and collect-before-reset on the real lane",
         "measure sustained throughput and crash dedup against the live ledger",
+        "feed PNG/JPEG/GIF/BMP/TIFF/WebP seeds and confirm ImageIO decode attempts",
     ]

@@ -2,8 +2,9 @@
 //
 // The parser is intentionally small and mechanical: it walks ISO BMFF boxes,
 // allocates parser state through parser_malloc(), and only hands plausible HEIF
-// inputs to ImageIO for decode. parser_malloc() is the allocation the Foundry
-// coverage gate looks for.
+// or raster image inputs (PNG/JPEG/GIF/BMP/TIFF/WebP) to ImageIO for decode.
+// Raster gates mirror ra/discovery/images.py _MIN_GATE_BYTES. parser_malloc()
+// is the allocation the Foundry coverage gate looks for.
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <ImageIO/ImageIO.h>
@@ -153,6 +154,65 @@ __attribute__((noinline)) HeifBoxes parse_heif_boxes(const uint8_t* data, size_t
   return result;
 }
 
+enum class ImageKind : uint8_t {
+  kUnknown = 0,
+  kPng,
+  kJpeg,
+  kGif,
+  kBmp,
+  kTiff,
+  kWebp,
+};
+
+// Magic-byte sniffing mirroring detect_image_format() in ra/discovery/images.py.
+ImageKind sniff_raster_format(const uint8_t* data, size_t size) {
+  static const uint8_t kPngSignature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+  if (size >= 8 && std::memcmp(data, kPngSignature, 8) == 0) {
+    return ImageKind::kPng;
+  }
+  if (size >= 4 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) {
+    return ImageKind::kJpeg;
+  }
+  if (size >= 6 && (std::memcmp(data, "GIF87a", 6) == 0 ||
+                    std::memcmp(data, "GIF89a", 6) == 0)) {
+    return ImageKind::kGif;
+  }
+  if (size >= 2 && data[0] == 'B' && data[1] == 'M') {
+    return ImageKind::kBmp;
+  }
+  if (size >= 4 &&
+      ((data[0] == 'I' && data[1] == 'I' && data[2] == 0x2A && data[3] == 0x00) ||
+       (data[0] == 'M' && data[1] == 'M' && data[2] == 0x00 && data[3] == 0x2A))) {
+    return ImageKind::kTiff;
+  }
+  if (size >= 12 && std::memcmp(data, "RIFF", 4) == 0 &&
+      std::memcmp(data + 8, "WEBP", 4) == 0) {
+    return ImageKind::kWebp;
+  }
+  return ImageKind::kUnknown;
+}
+
+// Minimum plausible sizes mirror _MIN_GATE_BYTES in ra/discovery/images.py.
+bool raster_gate_passes(ImageKind kind, size_t size) {
+  switch (kind) {
+    case ImageKind::kPng:
+      return size >= 8;
+    case ImageKind::kJpeg:
+      return size >= 4;
+    case ImageKind::kGif:
+      return size >= 13;
+    case ImageKind::kBmp:
+      return size >= 26;
+    case ImageKind::kTiff:
+      return size >= 8;
+    case ImageKind::kWebp:
+      return size >= 12;
+    case ImageKind::kUnknown:
+      return false;
+  }
+  return false;
+}
+
 __attribute__((noinline)) bool decode_with_imageio(const uint8_t* data, size_t size) {
   CFDataRef cf_data = CFDataCreate(kCFAllocatorDefault, data, CFIndex(size));
   if (cf_data == nullptr) {
@@ -182,8 +242,15 @@ __attribute__((noinline)) bool decode_with_imageio(const uint8_t* data, size_t s
 }  // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, size_t Size) {
-  const HeifBoxes boxes = parse_heif_boxes(Data, Size);
-  if (!boxes.has_ftyp_heif || !boxes.has_meta) {
+  bool plausible = false;
+  const ImageKind raster = sniff_raster_format(Data, Size);
+  if (raster != ImageKind::kUnknown) {
+    plausible = raster_gate_passes(raster, Size);
+  } else {
+    const HeifBoxes boxes = parse_heif_boxes(Data, Size);
+    plausible = boxes.has_ftyp_heif && boxes.has_meta;
+  }
+  if (!plausible) {
     return 0;
   }
 

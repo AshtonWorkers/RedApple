@@ -7,7 +7,19 @@ from collections.abc import Sequence
 from typing import TypeVar
 
 from ..errors import FormatFail
-from .heif import HEIF_BRANDS, heif_gate, parse_boxes, read_u32, write_u32, write_u64
+from .heif import (
+    FIELD_BOXES,
+    HEIF_BRANDS,
+    BoxNode,
+    container_payload_range,
+    iter_box_nodes,
+    parse_box_tree,
+    parse_boxes,
+    read_u32,
+    write_u32,
+    write_u64,
+)
+from .images import detect_image_format, image_gate, mutate_image_structure
 from .models import CampaignConfig, MutationCase
 
 _T = TypeVar("_T")
@@ -24,7 +36,17 @@ MUTATION_STRATEGIES = (
     "arith",
     "dictionary",
     "splice",
+    "box_field",
+    "box_insert",
+    "box_delete",
+    "box_nest",
+    "image_structure",
 )
+
+# Ops reachable through the ``image_structure`` meta-strategy. ``box_size`` and
+# ``box_type`` are included so one strategy exercises the whole structure tier.
+STRUCTURE_OPS = ("box_size", "box_type", "box_field", "box_insert", "box_delete", "box_nest")
+_STRUCTURE_STRATEGIES = STRUCTURE_OPS + ("image_structure",)
 
 BOX_TYPES = (
     b"ftyp",
@@ -107,6 +129,8 @@ def mutate_bytes(
         raise FormatFail(f"unknown mutation strategy {strategy!r}")
     if len(data) > max_bytes:
         data = data[:max_bytes]
+    if strategy in _STRUCTURE_STRATEGIES:
+        return _structure_bytes(data, strategy, rng, max_bytes=max_bytes)
     if strategy == "bitflip":
         return _bitflip(data, rng)
     if strategy == "byte_set":
@@ -115,10 +139,6 @@ def mutate_bytes(
         return _truncate(data, rng)
     if strategy == "extend":
         return _extend(data, rng, max_bytes=max_bytes)
-    if strategy == "box_size":
-        return _box_size(data, rng)
-    if strategy == "box_type":
-        return _box_type(data, rng)
     if strategy == "brand":
         return _brand(data, rng)
     if strategy == "arith":
@@ -266,6 +286,159 @@ def _splice(
     return out[:max_bytes]
 
 
+def _cap(data: bytes, max_bytes: int) -> bytes:
+    if max_bytes < 0:
+        max_bytes = 0
+    return data if len(data) <= max_bytes else data[:max_bytes]
+
+
+def _structure_bytes(
+    data: bytes, strategy: str, rng: DeterministicRng, *, max_bytes: int
+) -> bytes:
+    """Apply a structure-aware mutation for the detected image format."""
+    if not data:
+        return data
+    if strategy == "image_structure":
+        return _structure_bytes(data, str(rng.choice(STRUCTURE_OPS)), rng, max_bytes=max_bytes)
+    image_format = detect_image_format(data)
+    if image_format == "heif":
+        return _heif_structure_bytes(data, strategy, rng, max_bytes=max_bytes)
+    if image_format is not None:
+        return mutate_image_structure(data, image_format, strategy, rng, max_bytes=max_bytes)
+    # Unknown format: keep the legacy flat size/type mutators, bitflip otherwise.
+    if strategy == "box_size":
+        return _cap(_box_size(data, rng), max_bytes)
+    if strategy == "box_type":
+        return _cap(_box_type(data, rng), max_bytes)
+    return _bitflip(data, rng)
+
+
+def _heif_structure_bytes(
+    data: bytes, strategy: str, rng: DeterministicRng, *, max_bytes: int
+) -> bytes:
+    """Apply one HEIF box-tree mutation, falling back to bit flips."""
+    if strategy == "box_size":
+        return _cap(_box_size(data, rng), max_bytes)
+    if strategy == "box_type":
+        return _cap(_box_type(data, rng), max_bytes)
+    tree = parse_box_tree(data)
+    nodes = list(iter_box_nodes(tree))
+    if not nodes:
+        return _bitflip(data, rng)
+    if strategy == "box_field":
+        out = _heif_box_field(data, rng, nodes)
+    elif strategy == "box_insert":
+        out = _heif_box_insert(data, rng, nodes)
+    elif strategy == "box_delete":
+        out = _heif_box_delete(data, rng, nodes)
+    else:  # box_nest
+        out = _heif_box_nest(data, rng, nodes)
+    if out is None:
+        return _bitflip(data, rng)
+    return _cap(out, max_bytes)
+
+
+def _heif_box_field(
+    data: bytes, rng: DeterministicRng, nodes: list[BoxNode]
+) -> bytes | None:
+    """Mutate an aligned field inside a known HEIF field box."""
+    candidates = [
+        node
+        for node in nodes
+        if node.box.type in FIELD_BOXES and node.box.payload_size >= 4
+    ]
+    if not candidates:
+        return None
+    box = rng.choice(candidates).box
+    start = box.payload_offset
+    end = min(box.offset + box.size, len(data))
+    if end - start < 4:
+        return None
+    slots = list(range(start, end - 3, 4))
+    offset = rng.choice(slots[:1024])
+    out = bytearray(data)
+    mode = rng.randbelow(3)
+    if mode == 0:
+        out[offset] ^= 1 << rng.randbelow(8)
+    elif mode == 1:
+        write_u32(out, offset, rng.choice((0, 1, 0x7FFFFFFF, 0xFFFFFFFF)))
+    else:
+        write_u32(out, offset, read_u32(out, offset) + rng.randrange(-16, 17))
+    return bytes(out)
+
+
+def _random_box_bytes(rng: DeterministicRng, *, nested: bool = False) -> bytes:
+    payload = rng.randbytes(rng.randrange(0, 17))
+    kind = rng.choice(BOX_TYPES)
+    if nested:
+        child_payload = rng.randbytes(rng.randrange(0, 9))
+        child = (8 + len(child_payload)).to_bytes(4, "big") + rng.choice(BOX_TYPES) + child_payload
+        kind = rng.choice((b"grpl", b"udta", b"iprp", b"ipco"))
+        payload = child
+    return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+
+
+def _heif_insert_points(data: bytes, nodes: list[BoxNode]) -> list[int]:
+    points = {0, len(data)}
+    for node in nodes:
+        box = node.box
+        points.add(box.offset)
+        points.add(box.offset + box.size)
+        if node.children:
+            child_range = container_payload_range(data, box)
+            if child_range is not None:
+                points.add(child_range[0])
+                points.add(child_range[1])
+    return sorted(point for point in points if 0 <= point <= len(data))
+
+
+def _heif_box_insert(
+    data: bytes, rng: DeterministicRng, nodes: list[BoxNode]
+) -> bytes | None:
+    points = _heif_insert_points(data, nodes)
+    if not points:
+        return None
+    boundary = rng.choice(points)
+    inserted = _random_box_bytes(rng, nested=rng.randbelow(3) == 0)
+    return data[:boundary] + inserted + data[boundary:]
+
+
+def _heif_box_delete(
+    data: bytes, rng: DeterministicRng, nodes: list[BoxNode]
+) -> bytes | None:
+    candidates = [
+        node.box
+        for node in nodes
+        if node.box.type != b"ftyp"
+        and node.box.size >= 8
+        and node.box.offset + node.box.size <= len(data)
+        and len(data) - node.box.size >= 8
+    ]
+    if not candidates:
+        return None
+    box = rng.choice(candidates)
+    return data[: box.offset] + data[box.offset + box.size :]
+
+
+def _heif_box_nest(
+    data: bytes, rng: DeterministicRng, nodes: list[BoxNode]
+) -> bytes | None:
+    candidates = [
+        node.box
+        for node in nodes
+        if node.box.type != b"ftyp"
+        and node.box.size >= 8
+        and node.box.offset + node.box.size <= len(data)
+    ]
+    if not candidates:
+        return None
+    box = rng.choice(candidates)
+    child = data[box.offset : box.offset + box.size]
+    container_kind = rng.choice((b"grpl", b"udta", b"iprp", b"ipco", b"meta"))
+    wrapped = (8 + len(child)).to_bytes(4, "big") + container_kind + child
+    return data[: box.offset] + wrapped + data[box.offset + box.size :]
+
+
 class MutationEngine:
     """Plan deterministic mutated HEIF/image inputs."""
 
@@ -305,7 +478,7 @@ class MutationEngine:
             seeds=self._seeds,
         )
         digest = hashlib.sha256(data).hexdigest()
-        gate = heif_gate(data)
+        gate = image_gate(data)
         case_id = f"{campaign_id}-case-{index:08d}"
         return MutationCase(
             campaign_id=campaign_id,
@@ -316,28 +489,50 @@ class MutationEngine:
             data=data,
             digest=digest,
             gate_pass=gate.passes,
+            image_format=detect_image_format(self._seeds[seed_index]),
         )
 
 
-def load_corpus(paths: Sequence[str], *, max_input_bytes: int = CampaignConfig().max_input_bytes) -> list[bytes]:
-    """Load seed bytes from files or directories (sorted, deterministic)."""
+def load_corpus(
+    paths: Sequence[str],
+    *,
+    max_input_bytes: int = CampaignConfig().max_input_bytes,
+) -> list[bytes]:
+    """Load seed bytes from files or directory trees (sorted, deterministic).
+
+    Reads are capped at ``max_input_bytes + 1`` so huge corpus files never load
+    fully into memory; oversize seeds are truncated to ``max_input_bytes``.
+    Identical seed bytes are deduplicated so campaigns stay deterministic
+    regardless of corpus layout.
+    """
     from pathlib import Path
 
     files: list[Path] = []
     for raw in paths:
         path = Path(raw)
         if path.is_dir():
-            files.extend(sorted(item for item in path.iterdir() if item.is_file()))
+            files.extend(sorted(item for item in path.rglob("*") if item.is_file()))
         elif path.is_file():
             files.append(path)
     if not files:
         raise FormatFail("discovery corpus is empty")
     seeds: list[bytes] = []
+    seen: set[bytes] = set()
     for path in files:
-        data = path.read_bytes()
-        if not data:
+        try:
+            if path.stat().st_size == 0:
+                continue
+            with path.open("rb") as handle:
+                chunk = handle.read(max_input_bytes + 1)
+        except OSError as exc:
+            raise FormatFail(f"cannot read corpus file {path}: {exc}") from exc
+        if not chunk:
             continue
-        seeds.append(data[:max_input_bytes])
+        data = chunk[:max_input_bytes]
+        if not data or data in seen:
+            continue
+        seen.add(data)
+        seeds.append(data)
     if not seeds:
         raise FormatFail("discovery corpus has no non-empty seeds")
     return seeds

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from ra.discovery import (
+    IMAGE_FORMATS,
+    STRUCTURE_OPS,
     CampaignConfig,
     CampaignState,
     DiscoveryCampaign,
@@ -19,14 +21,29 @@ from ra.discovery import (
     LedgerDiscoveryStore,
     MacOSUnavailable,
     MutationEngine,
+    build_image_seed,
+    classify_crash,
+    detect_image_format,
+    image_gate,
     imageio_heif_feed_manifest,
     imageio_heif_feed_source,
     imageio_heif_harness_ref,
+    iter_box_nodes,
     macos_available,
     macos_verification_checklist,
+    mutate_image_structure,
+    parse_box_tree,
     require_macos,
 )
-from ra.discovery.heif import heif_gate, is_heif_brand, parse_boxes, read_u32, read_u64
+from ra.discovery.heif import (
+    find_box_nodes,
+    heif_gate,
+    is_heif_brand,
+    parse_boxes,
+    read_u32,
+    read_u64,
+)
+from ra.discovery.images import PNG_SIGNATURE, default_imageio_seeds
 from ra.discovery.models import CrashRecord
 from ra.discovery.mutate import MUTATION_STRATEGIES, DeterministicRng, load_corpus, mutate_bytes
 from ra.errors import DeviceLost, FormatFail, NotProvisioned
@@ -45,6 +62,13 @@ def heif_sample(
 ) -> bytes:
     ftyp_payload = brand + (0).to_bytes(4, "big") + b"".join(compatible)
     return box(b"ftyp", ftyp_payload) + box(b"meta", meta_payload)
+
+
+def rich_heif_sample() -> bytes:
+    ispe = box(b"ispe", b"\x00\x00\x00\x00" + (16).to_bytes(4, "big") * 2)
+    ipco = box(b"ipco", ispe)
+    iprp = box(b"iprp", ipco)
+    return heif_sample(meta_payload=b"\x00\x00\x00\x00" + iprp)
 
 
 @dataclass(frozen=True)
@@ -226,7 +250,7 @@ class TestDiscoveryMutation(unittest.TestCase):
             self.assertLessEqual(len(first.data), 96)
             self.assertEqual(first.seed_index, index % 2)
             self.assertEqual(first.strategy, MUTATION_STRATEGIES[index % len(MUTATION_STRATEGIES)])
-        self.assertEqual(engine.plan(10, "imageio_heif").strategy, "bitflip")
+        self.assertEqual(engine.plan(15, "imageio_heif").strategy, "bitflip")
 
     def test_RA_DISC_MUT_003_engine_edges_and_corpus(self) -> None:
         with self.assertRaises(FormatFail):
@@ -385,16 +409,50 @@ class DiscoveryStoreCase(unittest.IsolatedAsyncioTestCase):
         deduped = await self.store.record_crash(**{**kwargs, "crash": different_path})
         self.assertIsNone(deduped.claim_id)
 
-        different_payload = FakeCrash(
+        # Same crash class found by a different case/input/payload dedups too.
+        other_case = FakeCrash(
             id="crash_3",
-            handle_id="h1",
-            path="/tmp/a.ips",
+            handle_id="h3",
+            path="/tmp/c.ips",
             payload=b"other",
-            metadata={"vm": "ra-macos-1"},
+            metadata={"vm": "ra-macos-2"},
         )
-        recorded = await self.store.record_crash(**{**kwargs, "crash": different_payload})
+        cross_case = await self.store.record_crash(
+            **{
+                **kwargs,
+                "crash": other_case,
+                "case_id": "imageio_heif-case-00000099",
+                "input_digest": "b" * 64,
+                "strategy": "box_nest",
+                "case_index": 99,
+            }
+        )
+        self.assertIsNone(cross_case.claim_id)
+        self.assertEqual(cross_case.dedup_key, first.dedup_key)
+        self.assertEqual(len(self.ledger.claims_by_type("discovery_crash")), 1)
+
+        # A different signal is a different crash class and records a new claim.
+        segv = FakeCrash(
+            id="crash_4",
+            kind="macos_vm_crash",
+            handle_id="h1",
+            payload=b"SIGSEGV at 0xdeadbeef",
+        )
+        recorded = await self.store.record_crash(**{**kwargs, "crash": segv})
         self.assertIsNotNone(recorded.claim_id)
+        self.assertNotEqual(recorded.dedup_key, first.dedup_key)
+        value = json.loads(str(self.ledger.claim_by_dedup(recorded.dedup_key)["value_json"]))
+        self.assertEqual(value["signal"], "SIGSEGV")
+        self.assertEqual(value["category"], "native_crash")
         self.assertEqual(len(self.ledger.claims_by_type("discovery_crash")), 2)
+
+        # Image format is part of the crash class signature.
+        png_crash = FakeCrash(id="crash_5", kind="macos_vm_crash", payload=b"SIGSEGV")
+        png_variant = await self.store.record_crash(
+            **{**kwargs, "crash": png_crash, "image_format": "png"}
+        )
+        self.assertIsNotNone(png_variant.claim_id)
+        self.assertEqual(len(self.ledger.claims_by_type("discovery_crash")), 3)
 
     async def test_RA_DISC_STORE_003_state_from_dict_edges(self) -> None:
         state = self.make_state()
@@ -734,6 +792,28 @@ class TestDiscoveryCampaign(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thermal_result.state.cases_fed, 1)
         self.assertEqual(thermal_result.state.last_error["thermal"], "1")
 
+    async def test_RA_DISC_CAMP_011_mixed_format_campaign_replay(self) -> None:
+        seeds = [build_image_seed(image_format) for image_format in IMAGE_FORMATS]
+        config = self.config(campaign_id="imageio_mixed", max_cases=12)
+        lane = FakeLane()
+        first = await self.campaign.run(lane, None, None, seeds, config)
+        self.assertEqual(first.state.status, "completed")
+        self.assertEqual(first.state.cases_fed, 12)
+        self.assertEqual({case.image_format for case in first.cases}, set(IMAGE_FORMATS))
+
+        # Replaying the same seed in a fresh ledger reproduces identical feeds.
+        other_ledger = await Ledger.open(self.root / "replay" / "ledger.sqlite")
+        try:
+            other_store = LedgerDiscoveryStore(other_ledger)
+            other_campaign = DiscoveryCampaign(other_store)
+            replay_lane = FakeLane()
+            second = await other_campaign.run(replay_lane, None, None, seeds, config)
+            self.assertEqual(second.state.status, "completed")
+            self.assertEqual([case.digest for case in first.cases], [case.digest for case in second.cases])
+            self.assertEqual(lane.feeds, replay_lane.feeds)
+        finally:
+            await other_ledger.close()
+
 
 class TestDiscoveryMacOSGate(unittest.TestCase):
     def test_RA_DISC_MAC_001_platform_gate_and_harness_ref(self) -> None:
@@ -759,3 +839,400 @@ class TestDiscoveryMacOSGate(unittest.TestCase):
         self.assertEqual(manifest["id"], "imageio_heif_feed")
         self.assertTrue(manifest["stdin_feed"])
         self.assertIn("LLVMFuzzerTestOneInput.cc", manifest["source"])
+
+    def test_RA_DISC_MAC_002_multiformat_harness_metadata_and_linux_gate(self) -> None:
+        harness = imageio_heif_harness_ref(Path("/tmp/imageio_heif_feed"))
+        self.assertEqual(harness.metadata["format"], "heif")
+        self.assertEqual(harness.metadata["image_formats"], list(IMAGE_FORMATS))
+        checklist = macos_verification_checklist()
+        self.assertTrue(any("PNG/JPEG/GIF/BMP/TIFF/WebP" in item for item in checklist))
+        # Linux CI imports and gates safely: discovery never touches ImageIO.
+        self.assertFalse(macos_available(platform="linux"))
+        with self.assertRaises(MacOSUnavailable):
+            require_macos("imageio_heif")
+
+
+class TestDiscoveryHeifTree(unittest.TestCase):
+    def test_RA_DISC_TREE_001_nested_containers(self) -> None:
+        data = rich_heif_sample()
+        tree = parse_box_tree(data)
+        self.assertEqual([node.box.type for node in tree], [b"ftyp", b"meta"])
+        nodes = list(iter_box_nodes(tree))
+        self.assertEqual(len(nodes), 5)
+        self.assertEqual([node.depth for node in nodes], [0, 0, 1, 2, 3])
+        ispe_nodes = find_box_nodes(tree, b"ispe")
+        self.assertEqual(len(ispe_nodes), 1)
+        self.assertEqual(ispe_nodes[0].box.payload_size, 12)
+        self.assertLessEqual(ispe_nodes[0].box.offset + ispe_nodes[0].box.size, len(data))
+
+    def test_RA_DISC_TREE_002_malformed_and_bounds(self) -> None:
+        # A child with an absurd declared size stops that container only.
+        bad_child = (0xFFFFFFF0).to_bytes(4, "big") + b"free" + b"x" * 4
+        ftyp = box(b"ftyp", b"heic" + (0).to_bytes(4, "big") + b"mif1")
+        meta = box(b"meta", b"\x00\x00\x00\x00" + bad_child)
+        tail = box(b"free", b"tail")
+        tree = parse_box_tree(ftyp + meta + tail)
+        top_types = [node.box.type for node in tree]
+        self.assertIn(b"meta", top_types)
+        self.assertIn(b"free", top_types)
+        meta_node = tree[top_types.index(b"meta")]
+        self.assertEqual(meta_node.children, ())
+
+        # Size zero extends to end of file.
+        zero_box = b"\x00\x00\x00\x00" + b"free"
+        nodes = list(iter_box_nodes(parse_box_tree(zero_box)))
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].box.size, len(zero_box))
+
+        # Extended 64-bit sizes are honored.
+        ext = (1).to_bytes(4, "big") + b"free" + (16).to_bytes(8, "big") + b"payload"
+        nodes = list(iter_box_nodes(parse_box_tree(ext)))
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].box.size, 16)
+
+        # uuid boxes skip the 16-byte usertype before payload.
+        uuid_box = (28).to_bytes(4, "big") + b"uuid" + b"u" * 16 + b"data"
+        nodes = list(iter_box_nodes(parse_box_tree(uuid_box)))
+        self.assertEqual(nodes[0].box.payload_offset, 24)
+        self.assertEqual(nodes[0].box.payload_size, 4)
+
+        # Empty and short inputs parse to nothing.
+        self.assertEqual(parse_box_tree(b""), [])
+        self.assertEqual(parse_box_tree(b"\x00" * 7), [])
+        self.assertEqual(parse_box_tree(rich_heif_sample(), max_depth=0), [])
+
+    def test_RA_DISC_TREE_003_parse_budget_and_depth_cap(self) -> None:
+        data = rich_heif_sample()
+        nodes = list(iter_box_nodes(parse_box_tree(data, max_boxes=2)))
+        self.assertLessEqual(len(nodes), 2)
+
+        inner = box(b"free", b"x")
+        for _ in range(12):
+            inner = box(b"grpl", inner)
+        data = box(b"ftyp", b"heic" + (0).to_bytes(4, "big") + b"mif1") + inner
+        nodes = list(iter_box_nodes(parse_box_tree(data)))
+        self.assertEqual(max(node.depth for node in nodes), 8)
+
+    def test_RA_DISC_TREE_004_box_edge_cases(self) -> None:
+        # Extended-size header truncated at end of input.
+        self.assertEqual(parse_boxes(b"\x00\x00\x00\x01ftypab"), [])
+        # Same truncation inside a container child range.
+        child = (1).to_bytes(4, "big") + b"free" + b"x" * 4
+        meta = box(b"meta", b"\x00\x00\x00\x00" + child)
+        nodes = list(iter_box_nodes(parse_box_tree(meta)))
+        self.assertEqual([node.box.type for node in nodes], [b"meta"])
+        # A meta box with a too-small FullBox payload has no child range.
+        tiny_meta = box(b"meta", b"\x00\x00\x00")
+        nodes = list(iter_box_nodes(parse_box_tree(tiny_meta)))
+        self.assertEqual([node.box.type for node in nodes], [b"meta"])
+        self.assertEqual(nodes[0].children, ())
+        # iinf version 0 uses a 16-bit entry count before children.
+        child_box = box(b"free", b"x")
+        iinf_v0 = box(b"iinf", b"\x00\x00\x00\x00" + (1).to_bytes(2, "big") + child_box)
+        nodes = list(iter_box_nodes(parse_box_tree(iinf_v0)))
+        self.assertEqual([node.box.type for node in nodes], [b"iinf", b"free"])
+        # iinf version 2 uses a 32-bit entry count before children.
+        iinf_v2 = box(b"iinf", b"\x02\x00\x00\x00" + (1).to_bytes(4, "big") + child_box)
+        nodes = list(iter_box_nodes(parse_box_tree(iinf_v2)))
+        self.assertEqual([node.box.type for node in nodes], [b"iinf", b"free"])
+        # A truncated iinf entry count yields no children.
+        iinf_trunc = box(b"iinf", b"\x00\x00\x00\x00" + b"\x00")
+        nodes = list(iter_box_nodes(parse_box_tree(iinf_trunc)))
+        self.assertEqual([node.box.type for node in nodes], [b"iinf"])
+        # The gate tolerates a tiny ftyp payload.
+        gate = heif_gate(box(b"ftyp", b"heic") + box(b"meta", b"\x00\x00\x00\x00"))
+        self.assertFalse(gate.has_ftyp_heif)
+        self.assertTrue(gate.has_meta)
+
+
+class TestDiscoveryImages(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.seeds = {image_format: build_image_seed(image_format) for image_format in IMAGE_FORMATS}
+
+    def test_RA_DISC_IMG_001_detection_and_gate(self) -> None:
+        for image_format, data in self.seeds.items():
+            with self.subTest(image_format=image_format):
+                self.assertEqual(detect_image_format(data), image_format)
+                gate = image_gate(data)
+                self.assertTrue(gate.passes)
+                self.assertEqual(gate.image_format, image_format)
+        self.assertIsNone(detect_image_format(b""))
+        self.assertIsNone(detect_image_format(b"\x00" * 64))
+        self.assertEqual(detect_image_format(PNG_SIGNATURE), "png")
+        self.assertEqual(image_gate(b"").image_format, None)
+
+        # A bare HEIF ftyp box is detected but fails the full HEIF gate.
+        ftyp_only = box(b"ftyp", b"heic" + (0).to_bytes(4, "big") + b"mif1")
+        self.assertEqual(detect_image_format(ftyp_only), "heif")
+        gate = image_gate(ftyp_only)
+        self.assertFalse(gate.passes)
+        self.assertEqual(gate.detail, "heif_gate_failed")
+
+    def test_RA_DISC_IMG_002_seed_builders_deterministic(self) -> None:
+        for image_format in IMAGE_FORMATS:
+            with self.subTest(image_format=image_format):
+                self.assertEqual(build_image_seed(image_format), self.seeds[image_format])
+        self.assertEqual(set(default_imageio_seeds()), set(IMAGE_FORMATS))
+        with self.assertRaises(FormatFail):
+            build_image_seed("bmp2")
+        with self.assertRaises(ValueError):
+            build_image_seed("png", width=0)
+        with self.assertRaises(ValueError):
+            build_image_seed("png", height=4097)
+        with self.assertRaises(ValueError):
+            build_image_seed("jpeg", width=-1)
+        with self.assertRaises(ValueError):
+            build_image_seed("bmp", height=0)
+        with self.assertRaises(ValueError):
+            build_image_seed("tiff", width=5000)
+
+    def test_RA_DISC_IMG_003_mutators_deterministic_and_bounded(self) -> None:
+        for image_format, seed_data in self.seeds.items():
+            for strategy in MUTATION_STRATEGIES:
+                for rng_seed in (0, 1, 7):
+                    with self.subTest(image_format=image_format, strategy=strategy, rng_seed=rng_seed):
+                        first = mutate_bytes(seed_data, strategy, DeterministicRng(rng_seed), max_bytes=512)
+                        second = mutate_bytes(seed_data, strategy, DeterministicRng(rng_seed), max_bytes=512)
+                        self.assertEqual(first, second)
+                        self.assertLessEqual(len(first), 512)
+                        # A second mutation generation stays bounded too.
+                        again = mutate_bytes(
+                            first, "image_structure", DeterministicRng(rng_seed + 1), max_bytes=512
+                        )
+                        self.assertLessEqual(len(again), 512)
+
+    def test_RA_DISC_IMG_004_malformed_truncated_huge_inputs(self) -> None:
+        strategies = (
+            "box_size",
+            "box_type",
+            "box_field",
+            "box_insert",
+            "box_delete",
+            "box_nest",
+            "image_structure",
+            "bitflip",
+        )
+        for image_format, seed_data in self.seeds.items():
+            cuts = sorted({0, 1, 2, 7, 8, 9, 12, 13, 20} | set(range(0, min(len(seed_data), 33), 4)))
+            for cut in cuts:
+                prefix = seed_data[:cut]
+                for strategy in strategies:
+                    with self.subTest(image_format=image_format, cut=cut, strategy=strategy):
+                        out = mutate_bytes(prefix, strategy, DeterministicRng(cut + 1), max_bytes=64)
+                        self.assertIsInstance(out, bytes)
+                        self.assertLessEqual(len(out), 64)
+
+        # Random garbage never crashes the engine.
+        rng = DeterministicRng(0xC0FFEE)
+        for index in range(40):
+            junk = rng.randbytes(rng.randrange(0, 200))
+            for strategy in MUTATION_STRATEGIES:
+                out = mutate_bytes(junk, strategy, DeterministicRng(index), max_bytes=128)
+                self.assertLessEqual(len(out), 128)
+
+        # Absurd declared sizes inside otherwise valid headers stay bounded.
+        blobs = (
+            PNG_SIGNATURE + (0xFFFFFFFF).to_bytes(4, "big") + b"IHDR" + b"x" * 16,
+            b"\xff\xd8\xff\xe0" + (0xFFFF).to_bytes(2, "big") + b"JFIF\x00" + b"y" * 8,
+            b"BM" + b"\xff" * 30,
+            b"II*\x00" + b"\xff" * 60,
+            b"RIFF\xff\xff\xff\xffWEBP" + b"z" * 20,
+        )
+        for blob in blobs:
+            for strategy in MUTATION_STRATEGIES:
+                with self.subTest(blob=blob[:8], strategy=strategy):
+                    out = mutate_bytes(blob, strategy, DeterministicRng(5), max_bytes=96)
+                    self.assertLessEqual(len(out), 96)
+
+    def test_RA_DISC_IMG_005_mutation_sweep_bounds(self) -> None:
+        # A broad deterministic sweep exercises the random branches of every
+        # per-format mutator without ever exceeding the byte budget.
+        for image_format, seed_data in self.seeds.items():
+            for strategy in MUTATION_STRATEGIES:
+                for rng_seed in range(20):
+                    with self.subTest(image_format=image_format, strategy=strategy, rng_seed=rng_seed):
+                        out = mutate_bytes(
+                            seed_data,
+                            strategy,
+                            DeterministicRng(1000 + rng_seed),
+                            max_bytes=1024,
+                        )
+                        self.assertIsInstance(out, bytes)
+                        self.assertLessEqual(len(out), 1024)
+
+    def test_RA_DISC_IMG_006_webp_vp8x_field_mutation(self) -> None:
+        payload = b"\x00" * 10
+        chunk = b"VP8X" + len(payload).to_bytes(4, "little") + payload
+        riff_payload = b"WEBP" + chunk
+        seed_data = b"RIFF" + len(riff_payload).to_bytes(4, "little") + riff_payload
+        self.assertEqual(detect_image_format(seed_data), "webp")
+        outputs = {
+            mutate_bytes(seed_data, "box_field", DeterministicRng(seed), max_bytes=256)
+            for seed in range(12)
+        }
+        self.assertGreater(len(outputs), 1)
+        for out in outputs:
+            self.assertLessEqual(len(out), 256)
+
+    def test_RA_DISC_IMG_007_bounded_and_fallback_edges(self) -> None:
+        # A negative budget clamps to empty output.
+        out = mutate_image_structure(
+            build_image_seed("png"), "png", "box_size", DeterministicRng(0), max_bytes=-3
+        )
+        self.assertEqual(out, b"")
+        # Empty input falls back to empty output.
+        self.assertEqual(
+            mutate_image_structure(b"", "png", "box_size", DeterministicRng(0), max_bytes=8), b""
+        )
+        # Unknown formats are only bounded, never parsed.
+        self.assertEqual(
+            mutate_image_structure(b"not-an-image", None, "bitflip", DeterministicRng(0), max_bytes=8),
+            b"not-an-i",
+        )
+
+    def test_RA_DISC_IMG_008_direct_dispatch_edges(self) -> None:
+        # The meta strategy recurses into a concrete structure op per format.
+        # Unknown strategies hit each format's bounded fallback.
+        for image_format in IMAGE_FORMATS:
+            if image_format == "heif":
+                continue
+            seed_data = build_image_seed(image_format)
+            for strategy in ("image_structure", "bitflip", "unknown_op"):
+                with self.subTest(image_format=image_format, strategy=strategy):
+                    out = mutate_image_structure(
+                        seed_data, image_format, strategy, DeterministicRng(3), max_bytes=1024
+                    )
+                    self.assertIsInstance(out, bytes)
+                    self.assertLessEqual(len(out), 1024)
+
+
+class TestDiscoveryStructureMutation(unittest.TestCase):
+    def test_RA_DISC_STRUCT_001_heif_structure_ops(self) -> None:
+        seed_data = rich_heif_sample()
+        for op in STRUCTURE_OPS + ("image_structure",):
+            with self.subTest(op=op):
+                outputs = [
+                    mutate_bytes(seed_data, op, DeterministicRng(rng_seed), max_bytes=2048)
+                    for rng_seed in range(6)
+                ]
+                for out in outputs:
+                    self.assertIsInstance(out, bytes)
+                    self.assertLessEqual(len(out), 2048)
+                self.assertTrue(any(out != seed_data for out in outputs), op)
+
+    def test_RA_DISC_STRUCT_002_raster_structure_ops(self) -> None:
+        for image_format in IMAGE_FORMATS:
+            if image_format == "heif":
+                continue
+            seed_data = build_image_seed(image_format)
+            for op in STRUCTURE_OPS:
+                with self.subTest(image_format=image_format, op=op):
+                    outputs = [
+                        mutate_bytes(seed_data, op, DeterministicRng(rng_seed), max_bytes=2048)
+                        for rng_seed in range(4)
+                    ]
+                    for out in outputs:
+                        self.assertIsInstance(out, bytes)
+                        self.assertLessEqual(len(out), 2048)
+
+    def test_RA_DISC_STRUCT_003_engine_format_attribution_and_replay(self) -> None:
+        seeds = [build_image_seed(image_format) for image_format in IMAGE_FORMATS]
+        engine = MutationEngine(seeds, seed=1234, max_input_bytes=4096)
+        replay = MutationEngine(seeds, seed=1234, max_input_bytes=4096)
+        for index in range(140):
+            case = engine.plan(index, "mixed")
+            self.assertLessEqual(len(case.data), 4096)
+            self.assertEqual(case.image_format, IMAGE_FORMATS[index % len(IMAGE_FORMATS)])
+            self.assertEqual(case, replay.plan(index, "mixed"))
+
+
+class TestDiscoveryCorpusHardening(unittest.TestCase):
+    def test_RA_DISC_CORPUS_001_recursive_dedup_and_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            (root / "c").mkdir()
+            (root / "empty").mkdir()
+            (root / "a" / "x.bin").write_bytes(b"AA")
+            (root / "b" / "y.bin").write_bytes(b"AA")
+            (root / "c" / "z.bin").write_bytes(b"BBBB")
+            (root / "big.bin").write_bytes(b"K" * 100)
+            (root / "empty" / "e.bin").write_bytes(b"")
+
+            seeds = load_corpus([str(root)], max_input_bytes=4)
+            self.assertEqual(seeds, [b"AA", b"KKKK", b"BBBB"])
+            # Deterministic across repeated loads.
+            self.assertEqual(load_corpus([str(root)], max_input_bytes=4), seeds)
+            # Nested directory and mixed file/dir paths work.
+            self.assertEqual(load_corpus([str(root / "a")], max_input_bytes=4), [b"AA"])
+            both = load_corpus([str(root / "a" / "x.bin"), str(root / "c")], max_input_bytes=4)
+            self.assertEqual(both, [b"AA", b"BBBB"])
+
+    def test_RA_DISC_CORPUS_002_failures_and_oversize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sub").mkdir()
+            with self.assertRaises(FormatFail):
+                load_corpus([str(root / "sub")])
+            (root / "only_empty.bin").write_bytes(b"")
+            with self.assertRaises(FormatFail):
+                load_corpus([str(root / "only_empty.bin")])
+
+            huge = root / "huge.bin"
+            huge.write_bytes(b"H" * (2 * 1024 * 1024))
+            seeds = load_corpus([str(huge)], max_input_bytes=16)
+            self.assertEqual(seeds, [b"H" * 16])
+
+            # An unreadable file surfaces as FormatFail, not a raw OSError.
+            bad = root / "bad.bin"
+            bad.write_bytes(b"data")
+            bad.chmod(0)
+            try:
+                with self.assertRaises(FormatFail):
+                    load_corpus([str(bad)])
+            finally:
+                bad.chmod(0o644)
+
+
+class TestDiscoveryCrashClassification(unittest.TestCase):
+    def test_RA_DISC_SIG_001_categories_signals_and_bounds(self) -> None:
+        native = classify_crash(
+            FakeCrash(id="c1", kind="macos_vm_crash", path="/tmp/x.ips", metadata={"vm": "v"})
+        )
+        self.assertEqual(native.category, "native_crash")
+        self.assertIsNone(native.signal)
+
+        segv = classify_crash(FakeCrash(id="c2", kind="ios_crash", payload=b"terminating due to SIGSEGV"))
+        self.assertEqual(segv.signal, "SIGSEGV")
+        self.assertEqual(segv.category, "native_crash")
+
+        exc = classify_crash(FakeCrash(id="c3", kind="macos_vm_crash", payload=b"NSInvalidArgumentException"))
+        self.assertEqual(exc.exception, "NSInvalidArgumentException")
+        self.assertEqual(exc.category, "native_crash")
+
+        timeout = classify_crash(FakeCrash(id="c4", kind="hang", metadata={"feed_timeout_s": 30}))
+        self.assertEqual(timeout.category, "timeout")
+        meta_timeout = classify_crash(FakeCrash(id="c5", metadata={"timeout_s": 3}))
+        self.assertEqual(meta_timeout.category, "timeout")
+
+        unknown = classify_crash(FakeCrash(id="c6"))
+        self.assertEqual(unknown.category, "unknown")
+        self.assertEqual(unknown.kind, "fake")
+        self.assertEqual(unknown.context, "app")
+
+        fmt = classify_crash(FakeCrash(id="c7"), image_format="png")
+        self.assertEqual(fmt.image_format, "png")
+        signature = fmt.signature("camp")
+        self.assertEqual(
+            set(signature),
+            {"campaign_id", "kind", "context", "category", "signal", "exception", "image_format"},
+        )
+        self.assertEqual(signature["campaign_id"], "camp")
+
+        # Evidence scans are bounded: tokens past the cap are ignored.
+        far = FakeCrash(id="c8", payload=b"x" * 70000 + b"SIGSEGV")
+        self.assertIsNone(classify_crash(far).signal)
+        near = FakeCrash(id="c9", payload=b"x" * 100 + b"SIGBUS")
+        self.assertEqual(classify_crash(near).signal, "SIGBUS")
