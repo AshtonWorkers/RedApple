@@ -251,6 +251,49 @@ def test_cli_doctor_layout_json(tmp_path, capsys):
     assert payload["db"]["exists"] is False
 
 
+def _make_packaged_layout(root) -> None:
+    for rel in (
+        "ra/ledger",
+        "ra/press",
+        "ra/policy",
+        "ra/fleet",
+        "ra/ring",
+        "ra/foundry",
+        "ra/discovery",
+        "ra/triage",
+        "ra/ladder",
+        "ra/groom",
+        "ra/joins",
+        "ra/chain",
+        "ra/dup",
+        "ra/obs",
+        "ra/cli",
+        "ra/config",
+        "ra/lanes",
+        "ra/lanes/macos",
+        "ra/lanes/ios",
+        "grammars",
+        "schemas",
+        "migrations",
+        "models",
+    ):
+        (root / rel).mkdir(parents=True, exist_ok=True)
+
+
+def test_layout_check_installed_layout_omits_source_tree(tmp_path):
+    _make_packaged_layout(tmp_path)
+    assert layout_check(tmp_path) == []
+
+
+def test_layout_check_source_checkout_requires_source_tree(tmp_path):
+    _make_packaged_layout(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    for rel in ("docs", "tests/unit", "tests/golden", "tests/fixtures", "tests/injection"):
+        (tmp_path / rel).mkdir(parents=True)
+    (tmp_path / "redapple.toml").write_text("", encoding="utf-8")
+    assert layout_check(tmp_path) == ["missing tests/load"]
+
+
 def test_replay_queue_skips_blank_and_non_objects(tmp_path):
     path = tmp_path / "queue.jsonl"
     queue = ReplayQueue(path)

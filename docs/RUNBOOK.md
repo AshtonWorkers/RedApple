@@ -44,7 +44,7 @@ Thresholds: ledger commit p99 <= 3 ms, compile p99 <= 8 ms, tick p99 <= 5 ms, RS
 
 ## Troubleshooting
 
-- `ra doctor --layout` checks repo layout (`grammars`, `schemas`, `migrations`, `models`, `tests/*`, `redapple.toml`). In a source checkout all must be present; `tests/fixtures/.gitkeep` keeps the fixtures directory tracked.
+- `ra doctor --layout` checks package resources (`ra`, `grammars`, `schemas`, `migrations`, `models`). Source checkouts also require `docs/`, `redapple.toml`, and `tests/*`; installed wheels do not ship `tests/` or `docs/` and must not expect them. Runtime config still comes from `redapple.toml` in the working directory, `REDAPPLE_CONFIG`, or `--config`.
 - `FORMAT_FAIL` from `replay` means the queue has malformed JSON or invalid records; inspect the JSONL file.
 - `FORMAT_FAIL` from `golden` means the golden file is missing/unreadable or the task type is unknown.
 - `FORMAT_FAIL` from `attach --ring-node` means the ring node does not exist in the ledger.

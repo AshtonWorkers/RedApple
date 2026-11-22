@@ -26,6 +26,40 @@ COMMANDS = ("run", "attach", "replay", "golden", "doctor", "retain")
 DEFAULT_DB = Path(".redapple/ledger.sqlite")
 DEFAULT_QUEUE = Path(".redapple/press-queue.jsonl")
 _UNTIL_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_LAYOUT_PACKAGE_REQUIRED = (
+    "ra/ledger",
+    "ra/press",
+    "ra/policy",
+    "ra/fleet",
+    "ra/ring",
+    "ra/foundry",
+    "ra/discovery",
+    "ra/triage",
+    "ra/ladder",
+    "ra/groom",
+    "ra/joins",
+    "ra/chain",
+    "ra/dup",
+    "ra/obs",
+    "ra/cli",
+    "ra/config",
+    "ra/lanes",
+    "ra/lanes/macos",
+    "ra/lanes/ios",
+    "grammars",
+    "schemas",
+    "migrations",
+    "models",
+)
+_LAYOUT_SOURCE_ONLY_REQUIRED = (
+    "docs",
+    "redapple.toml",
+    "tests/unit",
+    "tests/golden",
+    "tests/fixtures",
+    "tests/injection",
+    "tests/load",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -317,40 +351,17 @@ async def _cmd_retain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_source_checkout(base: Path) -> bool:
+    return (base / "pyproject.toml").is_file()
+
+
 def layout_check(root: Path | None = None) -> list[str]:
     """Check required layout and the lanes-import boundary."""
     base = root or Path(__file__).resolve().parents[2]
     errors: list[str] = []
-    required = [
-        "ra/ledger",
-        "ra/press",
-        "ra/policy",
-        "ra/fleet",
-        "ra/ring",
-        "ra/foundry",
-        "ra/discovery",
-        "ra/triage",
-        "ra/ladder",
-        "ra/groom",
-        "ra/joins",
-        "ra/chain",
-        "ra/dup",
-        "ra/obs",
-        "ra/cli",
-        "ra/config",
-        "ra/lanes",
-        "ra/lanes/macos",
-        "ra/lanes/ios",
-        "grammars",
-        "schemas",
-        "migrations",
-        "models",
-        "tests/unit",
-        "tests/golden",
-        "tests/fixtures",
-        "tests/injection",
-        "tests/load",
-    ]
+    required = list(_LAYOUT_PACKAGE_REQUIRED)
+    if _is_source_checkout(base):
+        required.extend(_LAYOUT_SOURCE_ONLY_REQUIRED)
     for rel in required:
         if not (base / rel).exists():
             errors.append(f"missing {rel}")
