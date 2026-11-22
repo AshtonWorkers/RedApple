@@ -354,6 +354,21 @@ class Ledger:
         )
         return cast(int, result)
 
+    async def link_claim_artifact(
+        self,
+        claim_id: str,
+        artifact: ArtifactInput,
+        *,
+        role: str = "evidence",
+        created: int | None = None,
+    ) -> bool:
+        """Link an existing artifact to an existing claim exactly once per role."""
+        payload = self._artifact_payload(artifact, created=created)
+        payload["claim_id"] = claim_id
+        payload["role"] = role
+        result = await self._submit("link_claim_artifact", payload, rows=2)
+        return cast(bool, result)
+
     async def insert_join(self, payload: Mapping[str, Any]) -> str:
         """Insert a join row (skeleton; full join execution is M3)."""
         result = await self._submit("insert_join", dict(payload))
@@ -452,6 +467,10 @@ class Ledger:
             created_after=created_after,
             limit=limit,
         )
+
+    def verdicts_for_claim(self, claim_id: str) -> list[dict[str, Any]]:
+        """List review verdicts for a claim in insertion order."""
+        return self.store.verdicts_for_claim(claim_id)
 
     def get_work_order(self, work_order_id: str) -> dict[str, Any] | None:
         """Fetch a work order."""

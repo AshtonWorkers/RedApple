@@ -732,6 +732,28 @@ class LedgerStore:
         )
         return int(cursor.lastrowid or 0)
 
+    def _op_link_claim_artifact(self, payload: Mapping[str, Any]) -> bool:
+        claim_id = _text(payload, "claim_id")
+        row = self._conn.execute("SELECT id FROM claim WHERE id=?", (claim_id,)).fetchone()
+        if row is None:
+            raise FormatFail("claim does not exist")
+        artifact_id_value = _text(payload, "artifact_id")
+        self._insert_artifact_row(
+            {
+                "artifact_id": artifact_id_value,
+                "kind": _text(payload, "kind"),
+                "sha256": _text(payload, "sha256"),
+                "bytes": _int(payload, "bytes"),
+                "created": _int(payload, "created"),
+                "ttl_class": _text(payload, "ttl_class"),
+            }
+        )
+        cursor = self._conn.execute(
+            "INSERT OR IGNORE INTO claim_artifact(claim_id, artifact_id, role) VALUES(?,?,?)",
+            (claim_id, artifact_id_value, _text(payload, "role")),
+        )
+        return cursor.rowcount == 1
+
     def _op_insert_join(self, payload: Mapping[str, Any]) -> str:
         join_id = _text(payload, "join_id")
         self._conn.execute(
@@ -1026,6 +1048,14 @@ class LedgerStore:
         sql += " ORDER BY created, id LIMIT ?"
         params.append(limit)
         rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def verdicts_for_claim(self, claim_id: str) -> list[dict[str, Any]]:
+        """List review verdicts for a claim in insertion order."""
+        rows = self._conn.execute(
+            "SELECT id, claim_id, reviewer, agree, reason, created FROM verdict WHERE claim_id=? ORDER BY id",
+            (claim_id,),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def get_work_order(self, work_order_id: str) -> dict[str, Any] | None:
