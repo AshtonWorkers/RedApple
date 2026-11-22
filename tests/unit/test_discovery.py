@@ -849,7 +849,7 @@ class TestDiscoveryMacOSGate(unittest.TestCase):
         # Linux CI imports and gates safely: discovery never touches ImageIO.
         self.assertFalse(macos_available(platform="linux"))
         with self.assertRaises(MacOSUnavailable):
-            require_macos("imageio_heif")
+            require_macos("imageio_heif", platform="linux")
 
 
 class TestDiscoveryHeifTree(unittest.TestCase):

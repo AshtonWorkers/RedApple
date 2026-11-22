@@ -132,11 +132,12 @@ class SubprocessRunnerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cwd_used(self) -> None:
         runner = SubprocessRunner()
-        result = await runner.run(
-            [sys.executable, "-c", "import os; print(os.getcwd())"], cwd="/tmp"
-        )
-        self.assertEqual(result.returncode, 0)
-        self.assertTrue(result.stdout.strip().startswith("/tmp"))
+        with tempfile.TemporaryDirectory() as tmp:
+            result = await runner.run(
+                [sys.executable, "-c", "import os; print(os.getcwd())"], cwd=tmp
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(Path(result.stdout.strip()), Path(tmp).resolve())
 
     async def test_process_group_kill_on_cancel(self) -> None:
         runner = SubprocessRunner()
