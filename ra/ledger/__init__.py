@@ -359,6 +359,26 @@ class Ledger:
         result = await self._submit("insert_join", dict(payload))
         return cast(str, result)
 
+    async def update_join(
+        self,
+        join_id: str,
+        *,
+        state: str,
+        reliability: float | None = None,
+        lower_bound: float | None = None,
+        invariants_json: str | None = None,
+    ) -> bool:
+        """Update measured reliability/state for one join row."""
+        payload: dict[str, Any] = {"join_id": join_id, "state": state}
+        if reliability is not None:
+            payload["reliability"] = reliability
+        if lower_bound is not None:
+            payload["lower_bound"] = lower_bound
+        if invariants_json is not None:
+            payload["invariants_json"] = invariants_json
+        result = await self._submit("update_join", payload)
+        return cast(bool, result)
+
     async def insert_entry_point(self, payload: Mapping[str, Any]) -> str:
         """Insert a surface-graph entry point."""
         result = await self._submit("insert_entry_point", dict(payload))
@@ -408,6 +428,30 @@ class Ledger:
     def claim_artifacts(self, claim_id: str) -> list[dict[str, Any]]:
         """List artifact links for a claim."""
         return self.store.claim_artifacts(claim_id)
+
+    def get_join(self, join_id: str) -> dict[str, Any] | None:
+        """Fetch a join row by ID."""
+        return self.store.get_join(join_id)
+
+    def joins(
+        self,
+        *,
+        state: str | None = None,
+        states: Sequence[str] | None = None,
+        a_claim: str | None = None,
+        b_claim: str | None = None,
+        created_after: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List join rows in deterministic order."""
+        return self.store.joins(
+            state=state,
+            states=states,
+            a_claim=a_claim,
+            b_claim=b_claim,
+            created_after=created_after,
+            limit=limit,
+        )
 
     def get_work_order(self, work_order_id: str) -> dict[str, Any] | None:
         """Fetch a work order."""

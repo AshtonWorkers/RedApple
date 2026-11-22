@@ -751,6 +751,27 @@ class LedgerStore:
         )
         return join_id
 
+    def _op_update_join(self, payload: Mapping[str, Any]) -> bool:
+        updates = ["state=?"]
+        params: list[object] = [_text(payload, "state")]
+        for key in ("reliability", "lower_bound"):
+            if key in payload:
+                value = payload[key]
+                if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                ):
+                    raise FormatFail(f"join {key} must be a number or None")
+                updates.append(f"{key}=?")
+                params.append(value)
+        if "invariants_json" in payload:
+            updates.append("invariants_json=?")
+            params.append(_text(payload, "invariants_json"))
+        params.append(_text(payload, "join_id"))
+        cursor = self._conn.execute(
+            f'UPDATE "join" SET {", ".join(updates)} WHERE id=?', tuple(params)
+        )
+        return cursor.rowcount == 1
+
     def _op_insert_entry_point(self, payload: Mapping[str, Any]) -> str:
         entry_id = _text(payload, "entry_point_id")
         privilege_delta, parser_complexity, weight = _entry_point_values(payload)
@@ -953,6 +974,57 @@ class LedgerStore:
             """,
             (claim_id,),
         ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_join(self, join_id: str) -> dict[str, Any] | None:
+        """Fetch one join row."""
+        row = self._conn.execute(
+            'SELECT id, a_claim, b_claim, invariants_json, reliability, lower_bound, state, created '
+            'FROM "join" WHERE id=?',
+            (join_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def joins(
+        self,
+        *,
+        state: str | None = None,
+        states: Sequence[str] | None = None,
+        a_claim: str | None = None,
+        b_claim: str | None = None,
+        created_after: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List join rows with deterministic ordering."""
+        if states is not None and not states:
+            return []
+        conditions: list[str] = []
+        params: list[object] = []
+        if state is not None:
+            conditions.append("state=?")
+            params.append(state)
+        if states is not None:
+            placeholders = ",".join("?" for _ in states)
+            conditions.append(f"state IN ({placeholders})")
+            params.extend(states)
+        if a_claim is not None:
+            conditions.append("a_claim=?")
+            params.append(a_claim)
+        if b_claim is not None:
+            conditions.append("b_claim=?")
+            params.append(b_claim)
+        if created_after is not None:
+            conditions.append("created>=?")
+            params.append(created_after)
+        sql = (
+            'SELECT id, a_claim, b_claim, invariants_json, reliability, lower_bound, state, created '
+            'FROM "join"'
+        )
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY created, id LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
     def get_work_order(self, work_order_id: str) -> dict[str, Any] | None:
