@@ -25,7 +25,18 @@ from .schema import SCHEMA_SQL
 from .states import ClaimState, can_transition
 
 CLAIM_TYPES = frozenset(
-    {"bug_class", "rung", "groom", "join", "gadget_set", "root_cause", "dupe_score", "harness"}
+    {
+        "bug_class",
+        "rung",
+        "groom",
+        "join",
+        "gadget_set",
+        "root_cause",
+        "dupe_score",
+        "harness",
+        "discovery_crash",
+        "discovery_campaign",
+    }
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
 WORK_ORDER_STATES = frozenset({"ready", "parked", "done"})

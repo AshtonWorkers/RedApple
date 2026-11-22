@@ -30,6 +30,7 @@ grammars = ["*.json"]
 schemas = ["*.json"]
 migrations = ["*.sql"]
 models = ["*.json"]
+ra = ["discovery/corpus/*.js"]
 
 [tool.setuptools.data-files]
 "." = ["redapple.toml"]
