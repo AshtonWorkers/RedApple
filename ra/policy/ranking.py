@@ -9,7 +9,7 @@ from ..errors import FormatFail
 from .actions import parse_action
 from .models import SQLITE_INT_MAX
 
-WORK_ORDER_STATES = frozenset({"ready", "parked", "done", "failed", "shed"})
+WORK_ORDER_STATES = frozenset({"ready", "parked", "done", "failed", "shed", "dialect_defect"})
 
 
 @dataclass(frozen=True)

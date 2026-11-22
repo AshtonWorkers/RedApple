@@ -47,13 +47,14 @@ CLAIM_TYPES = frozenset(
     }
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})
-WORK_ORDER_STATES = frozenset({"ready", "parked", "done", "failed", "shed"})
+WORK_ORDER_STATES = frozenset({"ready", "parked", "done", "failed", "shed", "dialect_defect"})
 WORK_ORDER_TRANSITIONS: dict[str, frozenset[str]] = {
     "ready": frozenset({"parked", "done"}),
     "parked": frozenset(),
     "done": frozenset(),
     "failed": frozenset(),
     "shed": frozenset(),
+    "dialect_defect": frozenset(),
 }
 RUN_MODES = frozenset({"macos", "ios"})
 RUN_STATES = frozenset({"armed", "running", "drained", "aborted"})

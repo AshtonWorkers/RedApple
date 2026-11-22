@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS work_order(id TEXT PRIMARY KEY, run_id TEXT REFERENCE
     'widen_dialect','force_groom','try_gadget_set','escalate_model','demote','park')),
   unit TEXT NOT NULL, payload_json TEXT, cas_bytes INT NOT NULL DEFAULT 0,
   ev_cost REAL NOT NULL CHECK(ev_cost >= 0),
-  state TEXT NOT NULL CHECK(state IN ('ready','parked','done','failed','shed')),
+  state TEXT NOT NULL CHECK(state IN ('ready','parked','done','failed','shed','dialect_defect')),
   created INT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_wo_state ON work_order(state, created);
 CREATE INDEX IF NOT EXISTS ix_wo_ready_cas ON work_order(state, cas_bytes);
