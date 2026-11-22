@@ -18,8 +18,10 @@ def _parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run")
     run.add_argument("--time-budget", type=float, default=None)
     run.add_argument("--json", action="store_true")
-    sub.add_parser("stop")
-    sub.add_parser("status")
+    stop = sub.add_parser("stop")
+    stop.add_argument("--json", action="store_true")
+    status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true")
     return parser
 
 
@@ -45,7 +47,11 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_run(args))
     if args.command == "stop":
         stopped = asyncio.run(stop_engine())
-        print(json.dumps({"stopped": stopped}, indent=2))
+        if args.json:
+            status = ws.load_json(ws.status_path(), {})
+            print(json.dumps(status, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps({"stopped": stopped}, indent=2))
         return 0 if stopped else 1
     status = ws.load_json(ws.status_path(), {})
     print(json.dumps(status, indent=2, ensure_ascii=False))

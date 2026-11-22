@@ -6,6 +6,10 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
+import ra.app_engine.__main__ as app_main
+from ra.app_engine import workspace as ws
 from ra.app_engine.engine import (
     EngineConfig,
     _crash_leads,
@@ -98,3 +102,28 @@ def test_crash_leads_carry_exploitability_grade(tmp_path: Path) -> None:
             await ledger.close()
 
     asyncio.run(scenario())
+
+
+def test_cli_stop_and_status_accept_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "workspace"
+    ws.ensure_dirs(home)
+    ws.write_status(home, state="complete", run_id="run-test", model="test")
+    monkeypatch.setenv("REDAPPLE_HOME", str(home))
+
+    async def fake_stop(root: Path | None = None) -> bool:
+        return True
+
+    monkeypatch.setattr(app_main, "stop_engine", fake_stop)
+
+    assert app_main.main(["stop", "--json"]) == 0
+    stopped = json.loads(capsys.readouterr().out)
+    assert stopped["state"] == "complete"
+    assert "stopped" not in stopped
+
+    assert app_main.main(["status", "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["state"] == "complete"
