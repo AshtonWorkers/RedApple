@@ -1,10 +1,11 @@
-"""JSC discovery: crash harness, mutation fuzzer, and ledger persistence.
+"""Discovery engines: JSC fuzzing and surface/ImageIO campaigns.
 
-Ports PR #3's WebKit/JSC crash harness into the M0 trunk as a lane-producing
-engine. State is persisted exclusively through the claim ledger (see
-:mod:`ra.discovery.store`); there are no side JSON/SQLite stores.
+JSC discovery state is persisted through :mod:`ra.discovery.jsc_store`; surface
+campaign state is persisted through :mod:`ra.discovery.store`. Both use the M0
+claim ledger only.
 """
 
+from .campaign import DiscoveryCampaign, DiscoveryLane
 from .corpus import DEFAULT_CORPUS_DIR, load_corpus
 from .coverage import CoverageProvider, CoverageSample, CoverageScheduler, CoverageStats
 from .fuzzer import (
@@ -31,7 +32,31 @@ from .harness import (
     make_signature,
     timeout_result,
 )
+from .jsc_store import (
+    CLAIM_TYPE_CAMPAIGN,
+    CLAIM_TYPE_CRASH,
+    CampaignSummary,
+    CrashRecord,
+    LedgerCrashStore,
+)
+from .macos import (
+    MacOSUnavailable,
+    imageio_heif_feed_manifest,
+    imageio_heif_feed_source,
+    imageio_heif_harness_ref,
+    macos_available,
+    macos_verification_checklist,
+    require_macos,
+)
 from .minimize import MinimizedInput, minimize_crash_input
+from .models import (
+    CampaignConfig,
+    CampaignState,
+    CrashRefLike,
+    DiscoveryHarnessRef,
+    MutationCase,
+)
+from .mutate import MutationEngine
 from .mutators import (
     MUTATION_KIND_NAMES,
     SPICY,
@@ -50,13 +75,7 @@ from .mutators import (
     mutate_wrapper,
 )
 from .runner import JscRunner
-from .store import (
-    CLAIM_TYPE_CAMPAIGN,
-    CLAIM_TYPE_CRASH,
-    CampaignSummary,
-    CrashRecord,
-    LedgerCrashStore,
-)
+from .store import LedgerDiscoveryStore
 
 __all__ = [
     "ASAN_EXITCODE",
@@ -73,8 +92,10 @@ __all__ = [
     "SPICY",
     "TOKENS",
     "WRAPPERS",
+    "CampaignConfig",
     "CampaignMeta",
     "CampaignResult",
+    "CampaignState",
     "CampaignStats",
     "CampaignSummary",
     "CoverageProvider",
@@ -82,19 +103,32 @@ __all__ = [
     "CoverageScheduler",
     "CoverageStats",
     "CrashRecord",
+    "CrashRefLike",
     "CrashResult",
     "CrashSink",
+    "DiscoveryCampaign",
+    "DiscoveryHarnessRef",
+    "DiscoveryLane",
     "JscConfig",
     "JscFuzzer",
     "JscRunner",
     "LedgerCrashStore",
+    "LedgerDiscoveryStore",
+    "MacOSUnavailable",
     "MinimizedInput",
+    "MutationCase",
+    "MutationEngine",
     "MutationKind",
     "classify_run",
     "exec_error_result",
     "extract_stack",
+    "imageio_heif_feed_manifest",
+    "imageio_heif_feed_source",
+    "imageio_heif_harness_ref",
     "legacy_mutate",
     "load_corpus",
+    "macos_available",
+    "macos_verification_checklist",
     "make_signature",
     "minimize_crash_input",
     "mutate",
@@ -107,5 +141,6 @@ __all__ = [
     "mutate_program",
     "mutate_string",
     "mutate_wrapper",
+    "require_macos",
     "timeout_result",
 ]

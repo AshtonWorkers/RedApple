@@ -8,7 +8,7 @@ import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ra.discovery.store import CampaignSummary, CrashRecord
+from ra.discovery.jsc_store import CampaignSummary, CrashRecord
 from ra.lanes.base import (
     CrashRef,
     DeviceProfile,

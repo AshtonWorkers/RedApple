@@ -20,6 +20,7 @@ from ra.discovery import (
     timeout_result,
 )
 from ra.discovery.harness import CrashResult, classify_run, exec_error_result
+from ra.discovery.jsc_store import CrashRecord
 from ra.discovery.minimize import minimize_crash_input
 from ra.discovery.mutators import (
     GC_SNIPPETS,
@@ -35,7 +36,6 @@ from ra.discovery.mutators import (
     mutate_wrapper,
 )
 from ra.discovery.runner import _candidate_bytes
-from ra.discovery.store import CrashRecord
 from ra.proc import CommandResult
 
 ASAN_CRASH = (

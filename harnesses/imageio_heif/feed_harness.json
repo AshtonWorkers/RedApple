@@ -1,0 +1,23 @@
+{
+  "id": "imageio_heif_feed",
+  "format": "heif",
+  "surface": "imageio.heif",
+  "source": "LLVMFuzzerTestOneInput.cc",
+  "feed_source": "feed.cc",
+  "dialect": "heif.dialect.json",
+  "clangxx": "clang++",
+  "compile_args": [
+    "-g",
+    "-O1",
+    "-framework",
+    "ImageIO",
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "CoreGraphics"
+  ],
+  "output": "imageio_heif_feed",
+  "seed_corpus": "corpus",
+  "stdin_feed": true,
+  "parser_malloc_symbol": "parser_malloc"
+}

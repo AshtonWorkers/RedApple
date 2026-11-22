@@ -36,6 +36,7 @@ CLAIM_TYPES = frozenset(
         "harness",
         "discovery_crash",
         "discovery_campaign",
+        "discovery_state",
     }
 )
 TTL_CLASSES = frozenset({"ephemeral", "run", "pinned"})

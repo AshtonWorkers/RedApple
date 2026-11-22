@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from ..ledger.ids import UlidFactory
 from .coverage import CoverageProvider, CoverageScheduler
 from .harness import CrashResult
+from .jsc_store import CampaignSummary, CrashRecord
 from .minimize import minimize_crash_input
 from .mutators import (
     MUTATION_KIND_NAMES,
@@ -27,7 +28,6 @@ from .mutators import (
     mutate as mutate,
 )
 from .runner import JscRunner
-from .store import CampaignSummary, CrashRecord
 
 DEFAULT_SEED = 0xA11E
 DEFAULT_MAX_EXECUTIONS = 200000

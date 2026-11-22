@@ -22,7 +22,7 @@ from ra.discovery import (
 )
 from ra.discovery.fuzzer import CampaignResult
 from ra.discovery.harness import ASAN_EXITCODE, CrashResult
-from ra.discovery.store import CampaignSummary, CrashRecord
+from ra.discovery.jsc_store import CampaignSummary, CrashRecord
 from ra.proc import CommandResult
 
 ASAN_CRASH = (

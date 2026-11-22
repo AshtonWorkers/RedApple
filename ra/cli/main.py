@@ -327,6 +327,7 @@ def layout_check(root: Path | None = None) -> list[str]:
         "ra/policy",
         "ra/fleet",
         "ra/foundry",
+        "ra/discovery",
         "ra/triage",
         "ra/ladder",
         "ra/groom",

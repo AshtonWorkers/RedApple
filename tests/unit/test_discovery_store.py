@@ -1,4 +1,4 @@
-"""Tests for ``ra.discovery.store`` ledger persistence."""
+"""Tests for ``ra.discovery.jsc_store`` ledger persistence."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from ra.discovery.harness import classify_run
-from ra.discovery.store import (
+from ra.discovery.jsc_store import (
     CLAIM_TYPE_CAMPAIGN,
     CLAIM_TYPE_CRASH,
     MAX_INLINE_INPUT,
